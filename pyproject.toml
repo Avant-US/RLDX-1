@@ -30,7 +30,7 @@ classifiers = [
 
 # Mirror the main repo's baseline dependencies so install behaves the same.
 dependencies = [
-    "albumentations==1.4.18",
+    "albumentations==2.0.8",
     "av==15.0.0",
     "diffusers==0.35.1",
     "dm-tree==0.1.8",
