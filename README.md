@@ -2,7 +2,7 @@
 
 # RLDX-1
 
-[[Paper]](https://arxiv.org/abs/2605.03269) [[Project Page]](https://rlwrld.ai/rldx-1) [[Models]](https://huggingface.co/collections/RLWRLD/rldx-1)
+[[Paper]](https://arxiv.org/abs/2605.03269) [[Project Page]](https://rlwrld.ai/rldx-1) [[Models]](https://huggingface.co/collections/RLWRLD/rldx-1) [[Code]](https://github.com/RLWRLD/RLDX-1) [[Issues]](https://github.com/RLWRLD/RLDX-1/issues?q=is%3Aissue)
 
 <img src="assets/rldx_overview.png" width="100%" alt="RLDX-1 overview">
 
