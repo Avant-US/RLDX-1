@@ -1,6 +1,6 @@
-# VLA 训练任务全景:从 70 篇论文看具身预训练范式的设计、对比与演化
+# VLA 训练任务全景:从 74 篇论文看具身预训练范式的设计、对比与演化
 
-> **本文档目的**:基于 [`p/`](p/) 目录下 70 篇 VLA / 具身论文(2024-2026),系统梳理"训练任务"这一具身预训练的核心议题——它决定了 VLA 模型"能学到什么、不能学到什么、能泛化到哪、又会在哪里崩"。
+> **本文档目的**:基于 [`p/`](p/) 目录下 74 篇 VLA / 具身论文(2024-2026),系统梳理"训练任务"这一具身预训练的核心议题——它决定了 VLA 模型"能学到什么、不能学到什么、能泛化到哪、又会在哪里崩"。
 >
 > **写作约定**:
 > - 公式用 LaTeX:行内 \(\ \cdots\ \),块级 \[\ \cdots\ \];
@@ -22,7 +22,7 @@
 | 第 4 章 | 30 个训练任务范式的深度解析(直觉 + 公式 + 优劣 + 影响 + 证据) |
 | 第 5 章 | 横向对比矩阵:相同、不同、正负迁移 |
 | 第 6 章 | 训练任务的演化时间线 mermaid |
-| 第 7 章 | 70 篇论文训练任务速查卡(按七大类分组) |
+| 第 7 章 | 74 篇论文训练任务速查卡(按七大类分组) |
 | 第 8 章 | 场景化设计建议与常见反模式 |
 | 第 9 章 | 参考文献与论文 ↔ 范式 ↔ 锚点映射 |
 
@@ -1202,9 +1202,15 @@ flowchart TB
     pi06 --> pi07["2026 H1 π0.7 (Steerable + Emergent)"]
     pi0 --> rl_branch["2025 H2 RL 后训练 (LWD / SOP / TT-VLA / OPD / Lifelong)"]
     pi0 --> deploy_branch["2025 H2 后训练优化 (FLOWER / QuantVLA / Xiaomi-Robotics-0)"]
+    coevo --> unified["2026 H1 Unified 多模式 WAM (MotuBrain 5 模式 / X-WAM 4D RGB-D + ANS)"]
+    unified --> cc["2026 H1 Zero-training test-time selection (Consistency-Consensus +2.8 pp 无 reward)"]
+    pi05 --> acot["2026 H1 动作空间 CoT (ACoT-VLA EAR + IAR + AGP)"]
     coevo --> future["2026+ 多智能体共演化 + Lifelong + Edge"]
     rl_branch --> future
     deploy_branch --> future
+    unified --> future
+    cc --> future
+    acot --> future
 ```
 
 **关键拐点解释**(每条拐点对应一组训练任务的诞生;经典工作的 arXiv 链接见脚注 ^{[ext1-8]}):
@@ -1222,14 +1228,14 @@ flowchart TB
 
 - ^{[ext1]} **RT-1**: Brohan et al., "RT-1: Robotics Transformer for Real-World Control at Scale", arXiv 2212.06817 — A1 (Token AR) 在 VLA 上首次成功落地的奠基工作。
 - ^{[ext2]} **RT-2**: Brohan et al., "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control", arXiv 2307.15818 — 把动作 token 化纳入 LLM next-token 框架并共训 Web 数据的代表作。
-- ^{[ext3]} **OpenVLA**: Kim et al., "OpenVLA: An Open-Source Vision-Language-Action Model", arXiv 2406.09246 — 2024 开源 Token AR 基座,后续 70 篇里许多工作以其为对照 baseline。
+- ^{[ext3]} **OpenVLA**: Kim et al., "OpenVLA: An Open-Source Vision-Language-Action Model", arXiv 2406.09246 — 2024 开源 Token AR 基座,后续 74 篇里许多工作以其为对照 baseline。
 - ^{[ext4]} **Octo**: Octo Team, "Octo: An Open-Source Generalist Robot Policy", arXiv 2405.12213 — Berkeley 主导的开源通用机器人策略,Token AR / Diffusion 混合头早期版本。
 - ^{[ext5]} **Diffusion Policy**: Chi et al., "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion", arXiv 2303.04137 — A2 (DDPM) 在机器人控制上的奠基论文,本文档 4.A.2 节的核心 Loss 即来源于此。
 - ^{[ext6]} **π0**: Black et al., "π0: A Vision-Language-Action Flow Model for General Robot Control", arXiv 2410.24164 — A3 (Flow Matching) 在 VLA 上的首次大规模成功落地,后续 π0.5 / π0.6 / π0.7 / Ψ0 / FLOWER / X-VLA 等均直接沿用其 Flow head。
 - ^{[ext7]} **Flow Matching 原理**: Lipman et al., "Flow Matching for Generative Modeling", arXiv 2210.02747 — 4.A.3 节使用的 Conditional Flow Matching 的数学来源,推荐配合阅读以理解 Loss 项 \(\mathcal{L}_{FM}\) 与速度场推导。
 - ^{[ext8]} **I-JEPA**: Assran et al., "Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture", arXiv 2301.08243 — 4.B.2 节 JEPA latent WM 的理论原型;VLA-JEPA / Mask World Model / Being-H0.7 / Fast-WAM 等本文档收录论文均直接或间接源于此架构。
 
-**细化时间线**(70 篇里挑出每个范式的"代表 / 成熟"工作,按近似发表时间排序):
+**细化时间线**(74 篇里挑出每个范式的"代表 / 成熟"工作,按近似发表时间排序):
 
 - **2024 H2 — A3 Flow Matching 落地**:[π0(原版)] → 2025 H1 [π0.5] → 2025 H2 [FLOWER](#7a2-flower) / [X-VLA](#7c13-x-vla) → 2026 H1 [π0.6 Recap](#7e10-π06-recap) / [π0.7](#7d7-π07) / [Ψ0](#7c14-ψ0) / [Xiaomi-Robotics-0](#7a13-xiaomi-robotics-0)。
 - **2025 H1 — B1/B3 像素 WM 进入 VLA**:[Cosmos Policy](#7b3-cosmos-policy)(Cosmos-Predict2 视频基座) → [DreamZero](#7b4-dreamzero) → 2026 H1 [GigaWorld-Policy](#7b7-gigaworld-policy)(动作中心 + 推理可剥离)。
@@ -1241,15 +1247,18 @@ flowchart TB
 - **2025 H2 — C3 3D / Pose / Affordance 监督集中出现**:[Pose-VLA](#7c9-pose-vla) / [GeneralVLA](#7c3-generalvla) / [GST-VLA](#7c4-gst-vla) / [PokéVLA](#7c8-pokévla) / [ConsisVLA-4D](#7d1-consisvla-4d)。
 - **2025 H2 — G 后训练优化兴起**:[FLOWER](#7a2-flower)(G2 裁剪)→ [QuantVLA](#7g5-quantvla)(G1 量化)→ [Green-VLA](#7g3-green-vla)(G3 课程)→ [HiPolicy](#7g4-hipolicy) / [STRONG-VLA](#7g6-strong-vla) / [Genie Sim 3.0](#7g2-genie-sim-30)。
 - **2026 H1 — 工程系统化**:[VLA Foundry](#7f3-vla-foundry) 统一 L→V→A 训练栈;[VLANeXt](#7a12-vlanext) 12 条 recipe 消融;[StarVLA-α](#7a11-starvla-α) / [SimVLA](#7a10-simvla) 用"减法"达 SOTA;[RealMirror](#7f2-realmirror)、[Helix_02](#7e2-helix_02) 提供整机系统范式。
-- **2026+ 趋势**:World-Action 共演化(B4)预计成为下一代默认范式;Flow 步数将从 4-10 步进一步压到 1-2 步并配动态切换;Lifelong RFT + Replay 是真机量产的标配;跨本体 Latent Action 将逐步替代 Naive Mixing。
+- **2026 H1 — Unified 多模式 WAM**:[MotuBrain](#7b1-motubrain)(Vidu + 三流 MoT + H-Bridge,5 模式 VLA/WM/IDM/VGM/Joint 共享参数,RoboTwin 95.8/96.1 综合 #1);[X-WAM](#7b2-x-wam)(Wan2.2-5B + 轻量深度分支 + ANS,RoboCasa 79.2 / RoboTwin 90.7);两篇都把 B4 World-Action 共演化推到接近天花板。
+- **2026 H1 — Zero-training WAM ranking**:[Consistency-Consensus](#7b3-consistency-consensus-is-the-future-compatible--零训练-test-time-wam-ranking) 用 action-state consistency 在 Cosmos-Policy / LingBot-VA 上 zero-training **+2.8 pp RoboTwin 无 reward**;首次说明 WAM 已具备「内部一致 ≈ 决策可靠」属性,可被 zero-training 利用。
+- **2026 H1 — 动作空间 CoT**:[ACoT-VLA](#7g8-acot-vla--动作空间-chain-of-thought) 用 EAR(18 层 Transformer)+ IAR(每 VLM 层学习查询)+ AGP head **首次把 CoT 引入动作空间**(非 vision/language),LIBERO-Plus 87.5% 全局 #1。
+- **2026+ 趋势**:World-Action 共演化(B4)+ unified 多模式 WAM 共享参数预计成为下一代默认范式;**Zero-training test-time selection** 可与任何 WAM 即插即用;**动作空间 CoT** 取代 vision/language CoT 用于复杂操作;Flow 步数将从 4-10 步进一步压到 1-2 步并配动态切换;Lifelong RFT + Replay 是真机量产的标配;跨本体 Latent Action 将逐步替代 Naive Mixing。
 
 ---
 
-## 第 7 章 70 篇论文训练任务速查卡 [T2]
+## 第 7 章 74 篇论文训练任务速查卡 [T2]
 
-> **本章按训练任务的"主范式"分组**(七大类 A~G,共 70 篇)。每张卡片六字段:一句话定位 / 训练阶段链路 / 训练任务列表 / 主要 Loss / 卖点 / 范式归属。
-> 跨类论文(如同时是 World Model 又是 Distillation)放在其"最显著"的主类下,副类在范式归属里标注。字母索引见[第 9 章](#91-论文字母索引70-篇-t1)。
-> 分组合计:7.A 13 篇 / 7.B 15 篇 / 7.C 14 篇 / 7.D 8 篇 / 7.E 10 篇 / 7.F 3 篇 / 7.G 7 篇 = **70**。
+> **本章按训练任务的"主范式"分组**(七大类 A~G,共 74 篇)。每张卡片六字段:一句话定位 / 训练阶段链路 / 训练任务列表 / 主要 Loss / 卖点 / 范式归属。
+> 跨类论文(如同时是 World Model 又是 Distillation)放在其"最显著"的主类下,副类在范式归属里标注。字母索引见[第 9 章](#91-论文字母索引74-篇-t1)。
+> 分组合计:7.A 13 篇 / 7.B 18 篇 / 7.C 14 篇 / 7.D 8 篇 / 7.E 10 篇 / 7.F 3 篇 / 7.G 8 篇 = **74**。
 
 ### 7.A 模仿学习类(主) — 13 篇
 
@@ -1383,7 +1392,7 @@ flowchart TB
 - 卖点:LIBERO 98.7%;4090 上 80ms 推理;Λ-attention 防 prefix 抄捷径。
 - 范式归属:A3(主), A4(副), F1(副)
 
-### 7.B 世界模型 / 视频预测类(主) — 15 篇
+### 7.B 世界模型 / 视频预测类(主) — 18 篇
 
 **共同特点**:把"预测未来"作为辅助或主任务塞进 VLA。**像素未来帧** (B1) 仅 1 篇(Cosmos Policy);**Latent / JEPA** (B2) 4 篇(Being-H0.7、Fast-WAM、FutureVLA、MWM、VLA-JEPA)走"省算力"路线;**视频-动作联合** (B3) 4 篇(DreamZero、GigaWorld、HiF-VLA、Psi-R2);**World-Action 共演化** (B4) 5 篇(CoLA-World、OA-WAM、STARRY、VLAW、World-VLA-Loop)是 2025-2026 最热的方向。普遍发现:训练期视频/未来监督**塑造表征**贡献最大,推理期视频生成常可裁掉(Fast-WAM、GigaWorld 都验证)。
 
@@ -1919,7 +1928,7 @@ flowchart TB
 - 卖点:单 YAML 控全流程与数据混合;Foundry-Qwen3VLA-2.1B-MT 显著超越 LBM-MT。
 - 范式归属:F1(主), A3(副)
 
-### 7.G 后训练优化类(主) — 7 篇
+### 7.G 后训练优化类(主) — 8 篇
 
 **共同特点**:模型够强后,真机部署的瓶颈是速度 / 显存 / 数据效率 / 可量产。这 7 篇覆盖了 3 个 G 子范式的多种实现:**Curriculum / Mid-training** (G3,5 篇:DM0、Green-VLA、HiPolicy、STRONG-VLA、Genie Sim 3.0),**Quantization-aware** (G1:QuantVLA),以及 **零训练模块化** (TiPToP,非端到端 VLA 范式)。共同观察:多阶段课程 + 数据 / 噪声管理是把强 baseline 推向 SOTA 的最稳手段。
 
@@ -1989,6 +1998,52 @@ flowchart TB
 - 卖点:1 小时可部署 DROID;173 次试验匹配或超越 350h 微调的 π0.5-DROID;失败可定位到模块。
 - 范式归属:未明确(非端到端 VLA 训练范式)
 
+#### 7.G.8 [ACoT-VLA](p/ACoT-VLA_Action_Chain-of-Thought_for_Vision-Language-Action_Models/paper.pdf) — 动作空间 Chain-of-Thought
+- 一句话定位:**首个把 CoT 引入动作空间(非 vision/language)** — π0.5 base + EAR(显式参考动作)+ IAR(隐式动作先验)+ AGP head,LIBERO-Plus 2026 H1 SOTA 87.5%。
+- 训练阶段链路:π0.5 base 直接复用 → EAR(18 层 Transformer 从零训)+ IAR(每 VLM 层学习查询 Q_i)+ AGP head 联合 flow matching 训练 → 推理 EAR 自主生成 → AGP 融合。
+- 训练任务:
+  - 显式 reasoner 训练:\(\pi_\theta^{\text{ref}}\)(EAR)从 GT trajectory 学习生成 coarse 参考动作(H_ref=15, shift=2);**teacher-forcing**(\(Z^{\text{ex}}\) 训练用 GT,推理用 EAR 自身)
+  - 隐式 reasoner 训练:\(\pi_\theta^{\text{head}}\) (AGP) 融合 EAR 显式参考 + IAR 隐式先验作为条件,生成最终 action chunk(H=10, shift=1)
+- 主要 Loss:\(\mathcal{L} = \lambda_1 \mathcal{L}_{\pi_\theta^{\text{ref}}} + \lambda_2 \mathcal{L}_{\pi_\theta^{\text{head}}};\ \lambda_1 = \lambda_2 = 0.5\)(两个 flow matching MSE)
+- 卖点:**首个把 CoT 引入动作空间**,kinematically grounded 优于 visual/language 间接 representation;LIBERO-Long 等长程任务涨幅最显著;**LIBERO-Plus 全局 #1**;单卡 RTX 4090 推理。
+- 范式归属:**D5 CoT(主,动作空间)**, A3 Flow(副), F1 VQA(副,π0.5 base 继承)
+
+### 7.B 跨本体 BC PT 与 unified WAM(新增 3 张 WAM 卡,共 4 张) [T2]
+
+> 本节从「BC PT + WAM 范式归属」视角增补 3 张 2026 H1 unified WAM 卡(MotuBrain / X-WAM / Consistency-Consensus),作为 B4 World-Action 共演化范式的最新代表。
+
+#### 7.B.1 [MotuBrain](p/MotuBrain_An_Advanced_World_Action_Model_for_Robot_Control/paper.pdf) — 5 模式 unified WAM(Vidu 基座)
+- 一句话定位:**首个 5 种推理模式同模型支持的 unified WAM**(VLA / WM / IDM / VGM / Joint)— Vidu + 三流 MoT + H-Bridge,**RoboTwin 2.0 95.8/96.1 综合 #1 + WorldArena 最强 EWMScore**。
+- 训练阶段链路:Stage1 PT 仅视频分支(ego-centric + heterogeneous embodiment,video MSE only,加 LingBot-VA noisy-conditioning)→ Stage2 PT 仅动作分支冻视频(联合 V-A 维持对齐,SNR-based 独立 timestep)→ Non-AR + AR 两套独立 post-train(适配目标本体)→ Deploy(V2A 异步 + RTC + FP8 + DiT cache,**≥ 50× 加速**)。
+- 训练任务:
+  - Video flow matching:(text + cond image + noisy future video latents → future video latents)Loss = MSE flow matching;目标 = 跨模态 video prediction 能力。
+  - Action flow matching:(text + cond image + multi-view + noisy action → action chunk)Loss = MSE flow matching;目标 = 跨本体 action 生成能力,**10-D 相对 EEF 表示**(pos + 6D rot + gripper)。
+  - 联合 V-A loss:\(\mathcal{L} = \lambda_v \mathcal{L}_v + \lambda_a \mathcal{L}_a\)(Stage2 后训均用此)
+- 主要 Loss:\(\mathcal{L}_v = \text{MSE}(v_{\text{out}}, v_{\text{target}}),\ \mathcal{L}_a = \text{MSE}(a_{\text{out}}, a_{\text{target}})\)(Eq 5-6);video timeshift=6 / action timeshift=1
+- 卖点:**5 推理模式共享参数**;**新本体仅 50-100 demo 即可适配** 长程 + 灵巧操控(无需 VLM planner / 双系统 / 外部 memory);**FP8 + CUDA-graph + DiT cache 端到端 ≥ 50× 加速**;**H-Bridge 中间 50% 联合层** 平衡跨模态对齐与效率。
+- 范式归属:**B4 World-Action 共演化(主)**, A3 Flow(主), C4 Egocentric(副), 多阶段课程(副)
+
+#### 7.B.2 [X-WAM](p/X-WAM_Unified_4D_World_Action_Modeling_from_Video_Priors_with_Asynchronous_Denoising/paper.pdf) — 4D RGB-D unified WAM
+- 一句话定位:**首个 unified 4D WAM** — Wan2.2-TI2V-5B + 轻量深度分支(复制 final blocks)+ 多视角 RGB-D + Asynchronous Noise Sampling,**RoboCasa SOTA 79.2% / RoboTwin 2.0 90.7%**。
+- 训练阶段链路:5874 h / 1.49M episodes 多源 robot data PT(flow matching 联合 RGB + depth + action,**ANS 联合 timestep (t_O, t_a) 采样** 替代独立采样,与推理分布对齐)→ specific benchmark SFT(如 earphone packing 20h)→ Deploy(异步去噪,动作少步 / 视频多步)。
+- 训练任务:
+  - Flow matching 视频:(multi-view RGB + state → future RGB latent)Loss = MSE flow matching;目标 = 高保真未来视频生成。
+  - Flow matching 深度:(multi-view RGB-D → future depth latent)Loss = MSE flow matching(深度分支复制最后几层 DiT blocks);目标 = 3D 几何重建。
+  - Flow matching 动作:(multi-view RGB + state → action chunk)Loss = MSE flow matching;目标 = 策略 action 生成。
+- 主要 Loss:\(L_m = || f_\theta^m(z_{t_m}^m, t_m) - (\epsilon^m - z_0^m) ||^2\)(Eq 5,m ∈ {video, depth, action})
+- 卖点:**首个 unified 4D WAM**;**深度监督同时提升 3D 重建质量与策略 SR**(spatial supervision 多目标受益);**ANS 联合分布采样** 消除 train-test gap;真机 earphone packing 20h demo 即可微调。
+- 范式归属:**B4 World-Action 共演化(主)**, A3 Flow(主), C4 Egocentric(副,RGB-D 多视角)
+
+#### 7.B.3 [Consistency-Consensus (Is the Future Compatible?)](p/Is_the_Future_Compatible_Diagnosing_Dynamic_Consistency_in_World_Action_Models/paper.pdf) — 零训练 test-time WAM ranking
+- 一句话定位:**首个 zero-training test-time WAM selection** — 用 action-state consistency 在 Cosmos-Policy(joint pred)+ LingBot-VA(inverse dyn)上 zero-training **+2.8 pp RoboTwin 2.0**。
+- 训练阶段链路:**无 PT / Mid / SFT / RFT**(零训练 wrapper);Deploy 时每步采 K 次 rollout,按 consistency 排序选最高;background collapse 用 Δz_t 诊断后再用。
+- 训练任务:
+  - **无训练**;**度量计算** \(c_t = \exp(-\alpha \cdot d_{\text{MSE-latent}}(o_{t+\Delta}, \hat{o}_{t+\Delta}))\)(α=0.1,Eq 3)
+  - **背景塌缩诊断**:Δz_t = || z_{t+1} - z_t ||² 区分高/低动态任务
+- 主要 Loss:**无**;仅 latent-space MSE 一致性度量。
+- 卖点:**无新数据 / 无新参数 / 无训练**;**Cohen's d = 0.76 / 0.99**(Cosmos-Policy / LingBot-VA),**AUC = 0.77 / 0.88**;即插即用于任何 WAM。
+- 范式归属:**B4 World-Action 共演化(主,test-time 利用 WAM 一致性)**, D2 Value/Reward 替代(主,zero-training value head)
+
 ---
 
 ## 第 8 章 场景化设计建议与常见反模式 [T1]
@@ -2002,53 +2057,53 @@ flowchart TB
 - **首选范式**:A3 Flow Matching + D1 Future State + F1 VQA 共训。
 - **可选**:加 D5 CoT(若任务有组合 / 序列特征)。
 - **避坑**:不要为了"看起来全面"硬塞 B1 像素 WM——大概率拖慢推理而无收益。
-- **70 篇内证据**:[SimVLA](#7a10-simvla)(极简 Flow baseline,可作初始版本)/ [FLOWER](#7a2-flower)(4-8 步 Flow + 裁剪,工程范本)/ [Pose-VLA](#7c9-pose-vla)(C3 Pose 预训练接入)/ [LingBot-VLA](#7a5-lingbot-vla)(Flow + 实用主义工程)/ [VLA-Foundry](#7f3-vla-foundry)(F1 VQA 共训防遗忘)。
+- **74 篇内证据**:[SimVLA](#7a10-simvla)(极简 Flow baseline,可作初始版本)/ [FLOWER](#7a2-flower)(4-8 步 Flow + 裁剪,工程范本)/ [Pose-VLA](#7c9-pose-vla)(C3 Pose 预训练接入)/ [LingBot-VLA](#7a5-lingbot-vla)(Flow + 实用主义工程)/ [VLA-Foundry](#7f3-vla-foundry)(F1 VQA 共训防遗忘)。
 
 #### 8.1.2 人形 Loco-Manipulation(多任务,持续部署)
 
 - **首选范式**:A4 AR+连续 Head + G3 多阶段课程 + E1 仿真 RL + E5 Lifelong RFT。
 - **可选**:C4 Egocentric Latent Action(用大量人类视频)。
 - **避坑**:E6 Model-Based RL 慎用——人形动力学复杂,WM 容易学坏。
-- **70 篇内证据**:[Ψ0](#7c14-ψ0)(EgoDex 800h + 30h 真机,人形 loco-manip 基座)/ [GR00T_N1.6](#7a4-gr00t_n16)(NVIDIA 人形 A4 + G3 + F1)/ [Helix_02](#7e2-helix_02)(Figure 02 sim-real 闭环)/ [HY-Embodied-0.5](#7c5-hy-embodied-05)(C1 + 课程蒸馏)/ [DM0](#7g1-dm0)(端到端 G3 多阶段)/ [SmoothVLA](#7e5-smoothvla)(平滑性 RFT 防真机抖动)。
+- **74 篇内证据**:[Ψ0](#7c14-ψ0)(EgoDex 800h + 30h 真机,人形 loco-manip 基座)/ [GR00T_N1.6](#7a4-gr00t_n16)(NVIDIA 人形 A4 + G3 + F1)/ [Helix_02](#7e2-helix_02)(Figure 02 sim-real 闭环)/ [HY-Embodied-0.5](#7c5-hy-embodied-05)(C1 + 课程蒸馏)/ [DM0](#7g1-dm0)(端到端 G3 多阶段)/ [SmoothVLA](#7e5-smoothvla)(平滑性 RFT 防真机抖动)。
 
 #### 8.1.3 长程多步任务(开放语言指令)
 
 - **首选范式**:A4 + D5 CoT + C1 Step-Aware + D3 Trace。
 - **可选**:加 B5 Test-time Imagination 提升成功率。
 - **避坑**:D5 CoT latency 大,需做"CoT-on-demand"(仅模糊指令触发)。
-- **70 篇内证据**:[LoHo-Manip](#7d4-loho-manip)(D3 Trace + D5,长程标杆)/ [MolmoAct2](#7a7-molmoact2)(D5 Action Reasoning + A3 Flow)/ [CycleVLA](#7d2-cyclevla)(D5 + MBR 回溯)/ [TiPToP](#7g7-tiptop)(模块化开放词汇规划)/ [HY-Embodied-0.5](#7c5-hy-embodied-05)(C1 步骤对齐)/ [HiF-VLA](#7b8-hif-vla)(三视角 motion + D5)。
+- **74 篇内证据**:[LoHo-Manip](#7d4-loho-manip)(D3 Trace + D5,长程标杆)/ [MolmoAct2](#7a7-molmoact2)(D5 Action Reasoning + A3 Flow)/ [CycleVLA](#7d2-cyclevla)(D5 + MBR 回溯)/ [TiPToP](#7g7-tiptop)(模块化开放词汇规划)/ [HY-Embodied-0.5](#7c5-hy-embodied-05)(C1 步骤对齐)/ [HiF-VLA](#7b8-hif-vla)(三视角 motion + D5)。
 
 #### 8.1.4 跨本体迁移(N 种本体共训)
 
 - **首选范式**:C2 Cross-Embodiment Latent Action + 共享骨干 + Per-embodiment Head。
 - **避坑**:Naive 把所有本体数据简单 mixing → 必负迁移。
-- **70 篇内证据**:[LAP](#7c6-lap)(零样本跨本体迁移,Language-Action 预训练)/ [X-VLA](#7c13-x-vla)(Soft-prompt 跨本体)/ [OXE-AugE](#7c7-oxe-auge)(OXE Embodiment 增广)/ [World2Act](#7c12-world2act)(WM + Latent Action 跨本体)/ [ABot-M0](#7a1-abot-m0)(动作流形跨本体)/ [MINT-4B](#7a6-mint-4b)(C2 多尺度 VQ 跨本体)。
+- **74 篇内证据**:[LAP](#7c6-lap)(零样本跨本体迁移,Language-Action 预训练)/ [X-VLA](#7c13-x-vla)(Soft-prompt 跨本体)/ [OXE-AugE](#7c7-oxe-auge)(OXE Embodiment 增广)/ [World2Act](#7c12-world2act)(WM + Latent Action 跨本体)/ [ABot-M0](#7a1-abot-m0)(动作流形跨本体)/ [MINT-4B](#7a6-mint-4b)(C2 多尺度 VQ 跨本体)。
 
 #### 8.1.5 有限数据 SFT(只有几十~几百条示教)
 
 - **首选范式**:A3 Flow Matching + C3 Pose/Affordance(用预训练 Pose 模型)+ F2 蒸馏(从大 VLA)。
 - **避坑**:不要从头训世界模型——数据完全不够。
-- **70 篇内证据**:[Pose-VLA](#7c9-pose-vla)(通用 Pose 预训练即插即用)/ [GeneralVLA](#7c3-generalvla)(3D Affordance + 控制策略解耦)/ [GST-VLA](#7c4-gst-vla)(Gaussian Splat token 增强少样本)/ [PokéVLA](#7c8-pokévla)(口袋级 VLA + F1/F2 蒸馏)/ [StarVLA-α](#7a11-starvla-α)(精简 + F2 蒸馏)/ [FLOWER](#7a2-flower)(A3 高效 Flow,小样本友好)。
+- **74 篇内证据**:[Pose-VLA](#7c9-pose-vla)(通用 Pose 预训练即插即用)/ [GeneralVLA](#7c3-generalvla)(3D Affordance + 控制策略解耦)/ [GST-VLA](#7c4-gst-vla)(Gaussian Splat token 增强少样本)/ [PokéVLA](#7c8-pokévla)(口袋级 VLA + F1/F2 蒸馏)/ [StarVLA-α](#7a11-starvla-α)(精简 + F2 蒸馏)/ [FLOWER](#7a2-flower)(A3 高效 Flow,小样本友好)。
 
 #### 8.1.6 真机量产部署(实时 / 低显存)
 
 - **首选范式**:G1 量化 + G2 裁剪 + A3 Flow Matching(1-step) + 工程优化。
 - **避坑**:Flow 一步压不要走太极端,留 1~2 步做"安全 buffer"。
-- **70 篇内证据**:[QuantVLA](#7g5-quantvla)(W4A8 量化全配方)/ [FLOWER](#7a2-flower)(50% 层裁剪 + 中间 fusion)/ [Xiaomi-Robotics-0](#7a13-xiaomi-robotics-0)(80ms 实时执行开源)/ [HiPolicy](#7g4-hipolicy)(分层多频率 action chunking)/ [SimVLA](#7a10-simvla)(极简部署 baseline)/ [SOP](#7e6-sop)(部署即后训练)。
+- **74 篇内证据**:[QuantVLA](#7g5-quantvla)(W4A8 量化全配方)/ [FLOWER](#7a2-flower)(50% 层裁剪 + 中间 fusion)/ [Xiaomi-Robotics-0](#7a13-xiaomi-robotics-0)(80ms 实时执行开源)/ [HiPolicy](#7g4-hipolicy)(分层多频率 action chunking)/ [SimVLA](#7a10-simvla)(极简部署 baseline)/ [SOP](#7e6-sop)(部署即后训练)。
 
 #### 8.1.7 高频闭环控制 / 灵巧手(>30 Hz,接触密集)
 
 - **首选范式**:A4 AR + 高频 Flow 连续 head + B4 World↔Action 共演化(为抓握-滑落-重抓的强反馈链路)。
 - **可选**:E6 Model-Based RL(在仿真上学动力学先验,再迁真机)。
 - **避坑**:不要用纯像素 WM 做闭环规划——延迟和误差累积不允许。
-- **70 篇内证据**:[RLDX-1](#7a9-rldx-1)(灵巧手优先基础模型)/ [HiPolicy](#7g4-hipolicy)(高频 chunking)/ [OA-WAM](#7b10-oa-wam)(Object-Addressable WM)/ [EZ-M](#7e1-ez-m)(多任务 MBRL,人形控制)/ [STARRY](#7b12-starry)(B4 时空 WM + Diffusion)。
+- **74 篇内证据**:[RLDX-1](#7a9-rldx-1)(灵巧手优先基础模型)/ [HiPolicy](#7g4-hipolicy)(高频 chunking)/ [OA-WAM](#7b10-oa-wam)(Object-Addressable WM)/ [EZ-M](#7e1-ez-m)(多任务 MBRL,人形控制)/ [STARRY](#7b12-starry)(B4 时空 WM + Diffusion)。
 
 #### 8.1.8 VLN / 室内导航(连续/离散动作,远程目标)
 
 - **首选范式**:C1 Step-Aware 对比 + D1 Future State + D6 Hindsight。
 - **可选**:B2 Latent WM 做 future scene 预测。
 - **避坑**:不要把 VLN 当短程操作训——奖励稀疏 + horizon 长,直接 BC 会停滞。
-- **70 篇内证据**:[SACA](#7c11-saca)(VLN-CE step-aware 对比标杆)/ [P3Nav](#7d6-p3nav)(端到端 perception-prediction-planning)/ [BTK](#7c2-btk)(VLN 多模态知识库锚定)/ [ELITE](#7d3-elite)(D6 Hindsight + 意图迁移,VLN/VLA 通用)。
+- **74 篇内证据**:[SACA](#7c11-saca)(VLN-CE step-aware 对比标杆)/ [P3Nav](#7d6-p3nav)(端到端 perception-prediction-planning)/ [BTK](#7c2-btk)(VLN 多模态知识库锚定)/ [ELITE](#7d3-elite)(D6 Hindsight + 意图迁移,VLN/VLA 通用)。
 
 ### 8.2 常见反模式 [T1]
 
@@ -2065,7 +2120,7 @@ flowchart TB
 
 ### 8.3 未来趋势 [T3]
 
-基于 70 篇 2024-2026 论文的实证观察,下面 8 条趋势已经在多篇工作中显现,并极可能延续到 2026~2027 年:
+基于 74 篇 2024-2026 论文的实证观察,下面 8 条趋势已经在多篇工作中显现,并极可能延续到 2026~2027 年:
 
 1. **World-Action 共演化(B4)** 将成为下一代 VLA 的默认范式。证据:同期 6 篇([CoLA-World](#7b2-cola-world) / [STARRY](#7b12-starry) / [OA-WAM](#7b10-oa-wam) / [VLAW](#7b14-vlaw) / [World-VLA-Loop](#7b15-world-vla-loop) / [World2Act](#7c12-world2act))集中突破。
 2. **Flow Matching 步数(A3)** 继续从 4~10 步压到 1~2 步,但配合"分布内 / 分布外"的动态步数切换。证据:[FLOWER](#7a2-flower) 4-8 步 / [Xiaomi-Robotics-0](#7a13-xiaomi-robotics-0) 80ms / [SimVLA](#7a10-simvla) 极简管线全部 ≤8 步。
@@ -2083,19 +2138,21 @@ flowchart TB
 > 第一轮只放论文清单 + PDF/HTML 链接。第三轮回填"每篇论文 → 它使用了哪些范式 → 对应第 4 章哪些小节锚点"。
 > 外链优先复用 [`vla_sota_ls_2.md`](vla_sota_ls_2.md) 中已整理的 arXiv / 官方页 / GitHub 链接(待 polish 阶段统一补)。
 
-### 9.1 论文字母索引(70 篇) [T1]
+### 9.1 论文字母索引(74 篇) [T1]
 
 > 每行格式:`[论文短名](PDF/HTML 链接) → 速查卡编号 · **主范式** / 副范式 / 副范式 · 一句话定位`
-> 速查卡编号 `7.X.N` 对应第 7 章 "70 篇速查表" 中的同名子节(全文检索 "7.X.N" 即可跳转);
+> 速查卡编号 `7.X.N` 对应第 7 章 "74 篇速查表" 中的同名子节(全文检索 "7.X.N" 即可跳转);
 > **主范式** 指该论文最显著、最具新意的训练任务范式;副范式 = 论文同时引入或辅助的次级范式。
 > 第 4 章范式深度解析中,**主范式** 节会把该论文列入「代表论文」;副范式节会把它列为「次要支持」或「相关工作」。
 
 - [ABot-M0](p/ABot-M0_VLA_Foundation_Model_with_Action_Manifold_Learning/paper.pdf) → 7.A.1 · **A5** / A3 / G3 / C3 · 动作流形 + 双流感知 + 跨本体基座
+- [ACoT-VLA](p/ACoT-VLA_Action_Chain-of-Thought_for_Vision-Language-Action_Models/paper.pdf) → 7.G.8 · **D5(动作空间 CoT)** / A3 / F1 · π0.5 + EAR + IAR + AGP 动作空间 CoT(LIBERO-Plus #1)
 - [Being-H0.5](p/Being-H0.5/paper.pdf) → 7.C.1 · **C4** / A3 / F1 · 以 Egocentric 人手数据预训练 Latent Action
 - [Being-H0.7](p/Being-H0.7_A_Latent_World-Action_Model_from_Egocentric_Videos/paper.pdf) → 7.B.1 · **B2** / A3 / C2 · Egocentric Latent World-Action 联合模型
 - [BTK](p/Beyond_Textual_Knowledge_(BTK)_Leveraging_Multimodal_Knowledge_Bases_for_Enhancing_VLN/paper.pdf) → 7.C.2 · **C3** / D5 · VLN 的多模态知识库锚定
 - [CoLA-World](p/CoLA-World_Co-evolution_of_Latent_Action_+_World_Model/paper.pdf) → 7.B.2 · **B4** / C2 / B3 · Latent Action 与 World Model 共演化
 - [ConsisVLA-4D](p/ConsisVLA-4D_Advancing_Spatiotemporal_Consistency_in_Efficient_3D-Perception_and_4D-Reasoning_for_Robotic_Manipulation/paper.pdf) → 7.D.1 · **D1** / C3 / A4 · 4D 时空一致性预测做正则
+- [Consistency-Consensus (Is the Future Compatible?)](p/Is_the_Future_Compatible_Diagnosing_Dynamic_Consistency_in_World_Action_Models/paper.pdf) → 7.B.3(新增) · **B4(test-time)** / D2 · 零训练 test-time WAM ranking,RoboTwin +2.8 pp 无 reward
 - [Cosmos Policy](p/Cosmos_Policy_(NVIDIA)/paper.pdf) → 7.B.3 · **B1** / D2 / A2 · 大像素 WM 直接做策略基底
 - [CycleVLA](p/CycleVLA_Backtracking_+_MBR_Decoding_for_VLA/paper.pdf) → 7.D.2 · **D5** / G3 / A2 · 回溯 + MBR 解码自我纠错
 - [DM0](p/DM0_An_Embodied-Native_Vision-Language-Action_Model_towards_Physical_AI/paper.pdf) → 7.G.1 · **G3** / D5 / F1 · 端到端 Physical AI 多阶段课程
@@ -2127,6 +2184,7 @@ flowchart TB
 - [MINT](p/MINT_Mimic_Intent,_Not_Just_Trajectories_(MINT-4B)/paper.pdf) → 7.A.6 · **A1** / C2 / G3 · 模仿意图而非轨迹的 4B 离散 Token AR
 - [MolmoAct2](p/MolmoAct2_Action_Reasoning_Models_for_Real-world_Deployment/paper.pdf) → 7.A.7 · **A3** / A1 / D5 · 动作推理 + Action token AR
 - [MolmoB0T](p/MolmoB0T_Large-Scale_Simulation_Enables_Zero-Shot_Manipulation/paper.pdf) → 7.A.8 · **A3** / E1 · 大规模仿真 → 零样本真机
+- [MotuBrain](p/MotuBrain_An_Advanced_World_Action_Model_for_Robot_Control/paper.pdf) → 7.B.1(新增) · **B4** / A3 / C4 · Vidu + 三流 MoT + H-Bridge 5 模式 unified WAM(RoboTwin #1)
 - [NS-VLA](p/NS-VLA_Towards_Neuro-Symbolic_VLAs/paper.pdf) → 7.D.5 · **D5** / E2 · 神经-符号融合 VLA
 - [OA-WAM](p/OA-WAM_Object-Addressable_World_Action_Model_for_Robust_Robot_Manipulation/paper.pdf) → 7.B.10 · **B4** / A3 / C3 · Object-Addressable World-Action 联合
 - [OXE-AugE](p/OXE-AugE_Augmenting_OXE_with_Embodiment_Aug/paper.pdf) → 7.C.7 · **C2** / F3 · OXE 跨本体增强数据 + 自蒸馏
@@ -2156,12 +2214,13 @@ flowchart TB
 - [World2Act](p/World2Act_Latent_Action_Post-Training_via_Skill-Compositional_World_Models/paper.pdf) → 7.C.12 · **C2** / B4 / F2 · 技能可组合 WM + Latent Action 后训
 - [WoVR](p/WoVR_World_Models_as_Reliable_Simulators_for_Post-Training_VLAs/paper.pdf) → 7.E.9 · **E6** / B4 / E1 · WM 作为可靠 sim 用于 VLA 后训练
 - [X-VLA](p/X-VLA_Soft-Prompt_Cross-Embodiment_VLA/paper.pdf) → 7.C.13 · **C2** / A3 · Soft-prompt 跨本体
+- [X-WAM](p/X-WAM_Unified_4D_World_Action_Modeling_from_Video_Priors_with_Asynchronous_Denoising/paper.pdf) → 7.B.2(新增) · **B4** / A3 / C4 · Wan2.2-5B + 4D RGB-D + ANS unified 4D WAM(RoboCasa SOTA)
 - [Xiaomi-Robotics-0](p/Xiaomi-Robotics-0_Open-Sourced_VLA_with_Real-Time_Execution/paper.pdf) → 7.A.13 · **A3** / A4 / F1 · 小米实时执行开源 VLA
 - [π0.6](p/π0.6__Recap/paper.pdf) → 7.E.10 · **E2** / D2 / D6 · π0.6 Recap:真机 Online RL
 - [π0.7](p/π0.7_A_Steerable_Generalist_Robotic_Foundation_Model_with_Emergent_Capabilities/paper.pdf) → 7.D.7 · **D1** / D5 / A3 · 可引导的通用基础模型,涌现能力
 - [Ψ0](p/Ψ0_(Psi-Zero)_An_Open_Foundation_Model_Towards_Universal_Humanoid_Loco-Manipulation/paper.pdf) → 7.C.14 · **C4** / A3 / C2 · 开源通用人形 loco-manip 基座
 
-### 9.1.X 按主范式倒排索引(70 篇 → 7 大类 32 子范式) [T1]
+### 9.1.X 按主范式倒排索引(74 篇 → 7 大类 32 子范式) [T1]
 
 > 反向查询:给定一个范式,有哪些论文以此为主?
 > 用「**主**」标注主范式,_斜体_ 标注副范式;同一论文可同时出现在多个范式下,但「**主**」只在一个位置出现。
@@ -2179,8 +2238,8 @@ flowchart TB
 - **B1 像素未来帧**(1 主):**Cosmos Policy**(7.B.3, **主**) — 大像素 WM 直接做策略基底;计算最贵但表征最完整
 - **B2 Latent / JEPA 未来表征**(5 主):**Being-H0.7**(7.B.1)、**Fast-WAM**(7.B.5)、**FutureVLA**(7.B.6)、**Mask World Model**(7.B.9)、**VLA-JEPA**(7.B.13) 全部 **主**;成为 2026 主流 WM 形态
 - **B3 视频-动作联合**(4 主):**DreamZero**(7.B.4)、**GigaWorld-Policy**(7.B.7)、**HiF-VLA**(7.B.8)、**Psi-R2/Psi-W0**(7.B.11) **主**
-- **B4 World ↔ Action 共演化**(5 主):**CoLA-World**(7.B.2)、**OA-WAM**(7.B.10)、**STARRY**(7.B.12)、**VLAW**(7.B.14)、**World-VLA-Loop**(7.B.15) **主**;最难训但泛化最强
-- **B5 Test-Time Imagination**(0 主, 多副):_Fast-WAM(副)_、_WoVR(副)_、_DreamZero(副)_;通常作为 B2/B3 的 inference 增强
+- **B4 World ↔ Action 共演化**(8 主):**CoLA-World**(7.B.2)、**OA-WAM**(7.B.10)、**STARRY**(7.B.12)、**VLAW**(7.B.14)、**World-VLA-Loop**(7.B.15)、**MotuBrain**(7.B.1 新增,5 模式 unified)、**X-WAM**(7.B.2 新增,4D RGB-D)、**Consistency-Consensus**(7.B.3 新增,test-time WAM ranking)**主**;最难训但泛化最强,2026 H1 unified 多模式 WAM + zero-training selection 新形态出现
+- **B5 Test-Time Imagination**(0 主, 多副 + 1 主升级):_Fast-WAM(副)_、_WoVR(副)_、_DreamZero(副)_;**Consistency-Consensus(7.B.3 新增)** 是首个把 test-time selection 提升到 主范式的论文;通常作为 B2/B3 的 inference 增强
 
 **C. 表征 / 对齐(主)— 14 篇**
 
@@ -2195,7 +2254,7 @@ flowchart TB
 - **D2 Value / Reward-to-go**(1 主):**ReconVLA**(7.D.8, **主**, 部署层不确定性 head);_PRTS / Cosmos / TT-VLA / π0.6 副_
 - **D3 Trace / Trajectory**(1 主):**LoHo-Manip**(7.D.4, **主**);_HiF-VLA / HAMLET / GeneralVLA 副_
 - **D4 Mask 预测**(0 主,多副):_Mask World Model(主标 B2)_ — D4 单独做主范式的论文已极少,通常融入 B2
-- **D5 CoT / Reasoning**(2 主):**CycleVLA**(7.D.2)、**NS-VLA**(7.D.5) **主**;_MolmoAct2 / GST-VLA / DM0 / π0.7 / TiPToP 副_
+- **D5 CoT / Reasoning**(3 主):**CycleVLA**(7.D.2)、**NS-VLA**(7.D.5) **主**;**ACoT-VLA**(7.G.8,**首次提出动作空间 CoT** 取代 visual/language CoT,LIBERO-Plus #1);_MolmoAct2 / GST-VLA / DM0 / π0.7 / TiPToP 副_
 - **D6 Hindsight**(1 主):**ELITE**(7.D.3, **主**);_HiF-VLA / ReconVLA / π0.6 副_
 
 **E. RL / Post-training(主)— 10 篇**
@@ -2219,7 +2278,7 @@ flowchart TB
 - **G2 Pruning / 层裁剪**(0 主,多副):_FLOWER 副(主 A3)_、_HY-Embodied 副_;G2 作为副技巧,主范式罕见
 - **G3 Curriculum / Mid-training**(6 主):**DM0**(7.G.1)、**Genie Sim 3.0**(7.G.2)、**Green-VLA**(7.G.3)、**HiPolicy**(7.G.4)、**STRONG-VLA**(7.G.6)、**TiPToP**(7.G.7) **主**;_GR00T / MINT / GigaWorld / SmoothVLA / Ψ0 / CycleVLA / SACA / DM0 副_(G3 在 2026 几乎是新模型默认骨架)
 
-> 倒排索引交叉校验:**A 主 13 + B 主 15 + C 主 14 + D 主 8 + E 主 10 + F 主 3 + G 主 7 = 70 篇 ✓**;副范式累计远超 200 个标记,说明 2025-2026 VLA 训练任务已普遍走向「多任务复合 + 主辅清晰」的范式组合,而非单一目标。
+> 倒排索引交叉校验:**A 主 13 + B 主 18(+3 新)+ C 主 14 + D 主 8 + E 主 10 + F 主 3 + G 主 8(+1 新)= 74 篇 ✓**;副范式累计远超 200 个标记,说明 2025-2026 VLA 训练任务已普遍走向「多任务复合 + 主辅清晰」的范式组合,而非单一目标。**2026 H1 新增 4 篇**(MotuBrain / X-WAM / Consistency-Consensus 均归 B4 World-Action 共演化主;ACoT-VLA 归 G3 SFT 但实质是 D5 CoT 动作空间变体)。
 
 ### 9.2 外部可信资料 [T3]
 
@@ -2242,8 +2301,8 @@ flowchart TB
 > - 第 4 章:30+ 范式的「任务定义 → 输入/输出 → LaTeX Loss → 数据要求 → 代表论文 → 优势/局限 → 对模型的正负影响 → 为什么」八段式深度解析
 > - 第 5 章:5 组横向对比矩阵(BC/WM/RL、像素/Latent/JEPA、Token/Diffusion/Flow、单阶段/多阶段、正/负迁移)
 > - 第 6 章:RT-1 → 2026 主流的 mermaid 演化时间线 + 五大主线趋势
-> - 第 7 章:70 篇速查表(按 A-G 七大类分 7.A~7.G,共 32 子节,每篇含一句话定位 / 训练阶段链路 / 训练任务列表 / 主要 Loss 公式 / 卖点 / 范式归属)
+> - 第 7 章:74 篇速查表(按 A-G 七大类分 7.A~7.G,共 32+ 子节,每篇含一句话定位 / 训练阶段链路 / 训练任务列表 / 主要 Loss 公式 / 卖点 / 范式归属)
 > - 第 8 章:设计建议与反模式(场景化推荐 + 常见陷阱)
-> - 第 9 章:字母索引(70 篇带速查卡编号 + 主副范式)+ 按主范式倒排索引 + 外部链接映射
+> - 第 9 章:字母索引(74 篇带速查卡编号 + 主副范式)+ 按主范式倒排索引 + 外部链接映射
 >
 > 后续若需再迭代:第 9.2 节列出的可在 [`vla_sota_ls_2.md`](vla_sota_ls_2.md) 拿到的外部链接,可在 polish 阶段加固到对应章节末尾的脚注;第 7 章新论文(2026 H2 之后)可按现有 A-G 体系追加同构速查卡。

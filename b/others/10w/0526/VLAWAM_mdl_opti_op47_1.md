@@ -90,6 +90,7 @@ graph TD
         Helix2[Helix 02 三层 2026.01]
         BH05[Being-H0.5 2026.01]
         SOP[SOP fleet RL 2026.01]
+        ACoT[ACoT-VLA 动作CoT 2026.01]
         VLANeXt[VLANeXt 2026.02]
         DreamZero[DreamZero 14B WAM 2026.02]
         DM0[DM0 2026.02]
@@ -98,9 +99,12 @@ graph TD
         GigaWorld[GigaWorld-Policy 2026.03]
         Cosmos25[Cosmos Predict 2.5 2026]
         STARRY[STARRY 2026.04]
+        XWAM[X-WAM 4D WAM 2026.04]
+        MotuBrain[MotuBrain UniDiffuser+MoT 2026.04]
         pi07[π0.7 2026.04]
         HYE05[HY-Embodied-0.5 2026.04]
         LWD[LWD 16-arm fleet 2026.05]
+        Consensus[Consistency-Consensus 测试时选择 2026.05]
     end
 
     RT2 --> OpenVLA
@@ -125,6 +129,13 @@ graph TD
     VLANeXt --> pi07
     DM0 --> pi07
     HYE05 --> pi07
+    STARRY --> XWAM
+    GigaWorld --> XWAM
+    DreamZero --> MotuBrain
+    GigaWorld --> MotuBrain
+    pi05 --> ACoT
+    STARRY --> Consensus
+    DreamZero --> Consensus
 ```
 
 > **三个时代的本质差异**:
@@ -183,6 +194,12 @@ LIBERO 是 2024 年提出的单臂操作仿真 benchmark(`Spatial / Object / Goa
 - **π0.6 / π0.7**:π0.7 论文(arXiv 2604.15483)**整篇没跑 LIBERO**,只跑真机和跨本体;π0.6-MEM 也未公布 LIBERO-Long 数字。
 - **GR00T N1.7-LIBERO**:HF 有后训版权重 [HF: nvidia/GR00T-N1.7-LIBERO],但**未公开同 protocol 数字**。
 - **DreamZero**:NVIDIA 论文(arXiv 2602.15922)**不评 LIBERO**,只评 AgiBot G1 / DROID-Franka / RoboArena / MolmoSpaces。
+- **ACoT-VLA**(2026.01,AgiBot,arXiv 2601.11404):基于 π0.5 base + EAR + IAR,**LIBERO 平均 +1.6 pp over π0.5**,LIBERO-Long 子集提升尤其显著;同时**LIBERO-Plus 2026 H1 SOTA 87.5%**(全局 #1,见附录 A.1),验证「action-space CoT > visual / language CoT」假设。
+
+**LIBERO-Plus 鲁棒套件 2026 H1 Top 3**(arXiv 2510.03827 评测协议):
+- **#1 ACoT-VLA 87.5%** [arXiv 2601.11404]——EAR + IAR 动作空间 CoT;Camera / Robot / Language / Light / Background / Noise / Layout 7 维度全面领先 baseline 300M。
+- **#2 RLDX-1 86.7%** [arXiv 2605.03269]——MSAT 多流(Cognition / Physics / Motion / Memory)。
+- **#3 OA-WAM 83.9%** [arXiv 2605.06481]——对象槽位 swap-binding 鲁棒。
 
 > **观察**:在统一可比口径下,**FLOWER(2025.09 NeurIPS)/ VLANeXt / OpenVLA-OFT 才是当前 LIBERO-Long Top 3**——这与 Being-H0.5 / π0.5 自报 98.9% / 93% **并不矛盾**,而是因为**LIBERO 已饱和到 ±2% 区间**,口径差异比模型差异更大。**真正区分 SOTA 的是 LIBERO-plus 鲁棒套件**(VLANeXt 论文专门评测)+ **真机泛化**。
 
@@ -201,6 +218,9 @@ RoboCasa(NVIDIA, CoRL'24)2026 仍是**家居场景泛化的事实标准**。**�
 **论文自报但未上官榜**(口径不可直接和上面 21.9% 比):
 - **Being-H0.5 53.9%** 是 paper 自报 [arXiv 2601.12993],**未提交到官方 leaderboard**,**疑似 paper 用更窄子集或不同 horizon**(数字差 2.5×,不可能仅因方法差异)。
 - **Helix 02 / GR00T N2** 在 RoboCasa 上**找不到公开数据**(Helix 02 走真机路线,Figure 不发仿真分;GR00T N2 尚未公开)。
+- **X-WAM**(2026.04,清华+小米,arXiv 2604.26694):**论文自报 RoboCasa 平均 79.2%**(50 个任务),**用 Wan2.2-TI2V-5B + 4D RGB-D 联合预测 + ANS 异步去噪**,5874 h robot data PT。**论文表中显著超过 Cosmos-Policy / UWM / Motus 等先前 unified WAM**;**口径与官榜不同**(论文取 RoboCasa 50 任务平均,官榜更窄),但与 GigaWorld-Policy / STARRY 等 WAM 路线同口径对比明显领先。
+- **MotuBrain**(2026.04,小米,arXiv 2604.27792):未直接报 RoboCasa Overall;主要打 RoboTwin 2.0(见 1.3)。
+- **Consistency-Consensus**(2026.05,NYCU,arXiv 2605.07514):**无需训练**用 consistency 排序选 rollout,**RoboCasa 66.6 → 67.3 (+0.7 pp)**,与 GigaWorld-Policy 0.1 同 reference,验证「内部一致 ≈ 决策可靠」假设可作 value head 替代。
 
 > **观察**:官方 RoboCasa 榜的 Overall 仅 ~22%,意味着**家居场景泛化离饱和还非常远**(LIBERO 已 95%+,差 4×)。**GigaWorld-Policy 0.1 用 WAM 路线第一次进入 RoboCasa Top 3**(20.7% vs GR00T N1.5 20.0%),是 2026 H1 联合 video-action 路线进官榜的关键里程碑 [arXiv 2603.17240]。
 
@@ -220,11 +240,14 @@ RoboTwin 2.0(arXiv 2506.18088)2025 年中提出的双臂仿真,**5 轴强 DR**(�
 
 | Rank | 模型 | RoboTwin 2.0 数字 | 出处 |
 |---|---|---|---|
-| **真正 #1** | **STARRY**(2026.04) | **Clean 93.82% / Random 93.30%**(50 双臂任务);真机 **π0.5 42.5% → STARRY 70.8%(+28.3 pp)** | [arXiv 2604.26848] |
-| **真正 #2** | **GigaWorld-Policy**(2026.03) | **比 π0.5 +95%**;典型 Place Fan: π0.5 0.25 / X-VLA 0.36 / Motus 0.91 / GigaWorld 0.94 | [arXiv 2603.17240] |
-| **真正 #3** | Motus(GigaWorld 论文 baseline) | Place Fan 0.91 / Pick Dual Bottles 0.96 | [arXiv 2603.17240] |
+| **真正 #1** | **MotuBrain**(2026.04) | **Clean 95.8% / Random 96.1%**(50 双臂任务);**Pick Dual Bottles 100% / Place A2B Left 95–100% / Place Can Basket 等空间编排显著领先**;新本体仅 50–100 demos 适配 | [arXiv 2604.27792] |
+| **真正 #2** | **STARRY**(2026.04) | **Clean 93.82% / Random 93.30%**(50 双臂任务);真机 **π0.5 42.5% → STARRY 70.8%(+28.3 pp)** | [arXiv 2604.26848] |
+| **真正 #2 (无训练)** | **LingBot-VA + Consistency-Consensus**(2026.05) | **93.0%**(LingBot-VA baseline 90.2 → +2.8 pp,**无 reward 模型 / 无额外训练**) | [arXiv 2605.07514] |
+| **真正 #3** | **X-WAM**(2026.04) | **平均 90.7%**(50 双臂任务,Wan2.2-5B + 4D RGB-D + ANS) | [arXiv 2604.26694] |
+| 参考 | **GigaWorld-Policy**(2026.03) | **比 π0.5 +95%**;典型 Place Fan: π0.5 0.25 / X-VLA 0.36 / Motus 0.91 / GigaWorld 0.94 | [arXiv 2603.17240] |
+| 参考 | Motus(GigaWorld 论文 baseline) | Place Fan 0.91 / Pick Dual Bottles 0.96 | [arXiv 2603.17240] |
 
-> **观察**:RoboTwin 2.0 是**联合 video-action(WAM)路线 vs 纯反应式 VLA 路线分水岭**——STARRY 与 GigaWorld-Policy 都是显式建模未来视频 latent,涨幅 +95% 与 +28.3 pp 真机均**远超纯 VLA 改进**;**纯 VLA 改进(如更好的 tokenizer)在 RoboTwin 2.0 上至多 +10%**[arXiv 2603.17240; 2604.26848]。**π0.6 在 RoboTwin 2.0 上找不到公开数据**——PI 系列至 π0 才上官榜。
+> **观察**:RoboTwin 2.0 是**联合 video-action(WAM)路线 vs 纯反应式 VLA 路线分水岭**——STARRY / GigaWorld-Policy / MotuBrain / X-WAM 都是显式建模未来视频 latent;**MotuBrain 95.8% / 96.1% 把 RoboTwin 2.0 推到接近天花板**(Clean 几乎无错);**Consistency-Consensus 在不动模型的前提下白送 +2.8 pp**,提示当前 WAM 已具备「内部 ranking 一致性」这一可被 zero-training 利用的属性。**纯 VLA 改进(如更好的 tokenizer)在 RoboTwin 2.0 上至多 +10%**[arXiv 2603.17240; 2604.26848]。**π0.6 在 RoboTwin 2.0 上找不到公开数据**——PI 系列至 π0 才上官榜。
 
 ### 1.4 SimplerEnv (Bridge / Fractal / Google Robot, MMRV 一致性)
 
@@ -333,6 +356,18 @@ EWMScore = 16 个指标算术均值(Track 1 Video Quality)。**最终榜要等 2
 | 待补 | **ABot-PhysWorld**(amap-cvlab 提交) | EWMScore 数字在官方 HF Space 还未公开(Track 1 leaderboard 5/15 才首次更新,5/25 终榜),**找不到具体分数** | [github.com/amap-cvlab/ABot-PhysWorld] |
 
 > **关键警告**:WorldArena 显式发现 **"perception-functionality gap"**——14 个 SOTA 模型中"画质好的不一定具身有用",这是 2026 年最重要的 WM 发现 [arXiv 2602.08971]。所以排名仅供参考,**用于 VLA 集成时需重新用 dWorldEval 或 PolaRiS 评测**。**Track 2(下游策略评测)目前结果**:CtrlWorld 与 TesserAct 在交互质量/轨迹精度领先;但**官方 Top 3 还没公开发布**。
+
+> **2026-04 末更新**:**MotuBrain**(arXiv 2604.27792)论文自报「**WorldArena 最强 EWMScore**(与对比方法相比)」——它是**同一模型既能跑高 SR(RoboTwin 96.1%)又能跑高 EWMScore** 的首批 unified WAM 之一,直接挑战上述 "perception-functionality gap" 现象。MotuBrain 通过 **Vidu 基座 + 三流 MoT + H-Bridge** 实现 5 种推理模式(VLA / WM / IDM / VGM / Joint)共享参数。
+
+#### 1.9.5 4D 重建 + 视频生成质量(X-WAM, 2026-04)
+
+| Rank | 模型 | 指标 | 出处 |
+|---|---|---|---|
+| **#1** | **X-WAM**(2026.04) | **4D 重建 + 视频生成 visual & geometric 指标均 SOTA**(超过 Cosmos-Policy / UWM / Motus 等先前 unified WAM);RoboCasa 79.2 / RoboTwin 90.7 同步领先 | [arXiv 2604.26694] |
+| 参考 | Cosmos-Policy(NVIDIA) | 2D pixel-only,3D 重建无 | [arXiv 2501.xxxxx] |
+| 参考 | UWM / Motus | 2D unified WAM,无 3D 监督 | — |
+
+> **X-WAM 关键洞察**:**深度分支同时提升 3D 重建质量与策略成功率双指标**(消融验证,Sec 4.3)——这是「spatial supervision 多目标受益」最直接证据,与上文 perception-functionality gap 反向呼应:**只要 3D 监督是 explicit + 与视频共享 backbone,画质与具身有用性可同涨**。
 
 #### 1.9.2 dWorldEval(arXiv 2604.22152)— **不是排行榜,是 evaluator 工具**
 
@@ -491,6 +526,7 @@ graph LR
   A[GO-1 / GO-1 Air 2025.09<br/>arXiv 2503.06669<br/>InternVL 2.5-2B + latent planner] --> B[A3 + G2 Air 2026.04.17<br/>OmniHand + Swift Picker<br/>1M+ traj, 217 tasks]
   B --> C[GO-2 2026.04.09<br/>动作思维链 ACoT-VLA<br/>异步双系统<br/>千台级分布式 RL]
   C --> D[Genie Sim 3.0 + AgiBot World 2026<br/>10000h 合成 + 100% 真实采集]
+  C --> E[ACoT-VLA 论文 2026.01<br/>arXiv 2601.11404<br/>π0.5 + EAR + IAR<br/>LIBERO-Plus 87.5% SOTA]
 ```
 
 **逐版本消融**:
@@ -500,6 +536,7 @@ graph LR
 | **GO-1 / GO-1 Air** | 2025.09, [arXiv 2503.06669] + [HF agibot-world/GO-1](https://huggingface.co/agibot-world/GO-1) | InternVL 2.5-2B + latent planner | AgiBot World 数据 + latent action;Air 为轻量版 | "**GO-1 outperforms RDT by 32%**";"在 in-domain 和 OOD 上比 OXE-trained 模型平均 **+30%**";复杂灵巧/长程真机 **>60% 成功**;**Latent-Planner ablation: GO-1 78% vs GO-1 w/o Latent-Planner 66%(−12 pp)** | OmniHand 真机 |
 | **A3 + G2 Air** | 2026.04.17, [agibot.com/article/231/detail/63](https://www.agibot.com/article/231/detail/63.html) | G2 + AGIBOT OmniHand + Swift Picker;多模态(RGBD/触觉/LiDAR/IMU) | "free-form 数据采集";真机数据集 **1M+ trajectories,217 tasks,5 scenes**;100% 真实场景 | **未给单独 ablation 百分比**——A3 / G2-Air 模型本身的逐版本消融数字**找不到公开**;但 **G2 在龙旗 8 小时直播 99.9% 成功率,UPH 310** | 五种部署场景;**A3 通过"擎天租"覆盖 60+ 城市;2026.03 累计交付突破 1 万台** |
 | **GO-2** | 2026.04.09, [Robot Report](https://www.therobotreport.com/agibot-releases-go-2-foundation-model-embodied-ai/) | "动作思维链 ACoT-VLA"(CVPR 2026)+ 异步双系统 | 支持**千台级机器人分布式 RL**,工业任务**分钟级收敛,数据量需求降 50%+** | 公开博文未给具体 ablation 表 | 千台级集群部署 |
+| **ACoT-VLA(论文)** | 2026.01, [arXiv 2601.11404](https://arxiv.org/abs/2601.11404) + [GitHub AgibotTech/ACoT-VLA](https://github.com/AgibotTech/ACoT-VLA) | π0.5 base(SigLIP + Gemma-2B 18 层 d=2048)+ **EAR**(18 层轻量 Transformer,cross-attn VLM 各层 KV cache,flow matching 出 H_ref=15 参考动作)+ **IAR**(M=1 学习查询,d'=128 降维提取潜在动作先验)+ **AGP**(融合显式 + 隐式条件) | **action-space CoT** 取代 language CoT(λ_lang)与 vision CoT(λ_vis):\(\pi_\theta(a_{t:t+H-1}, g_{\text{action}} \mid o_t, l)\);训练 8×H100 bf16 + LR cosine + 10K warmup + peak 5e-5 + EMA 0.999;推理单卡 RTX 4090 | **LIBERO 平均 +1.6 pp over π0.5**;**LIBERO-Plus 87.5% 全局 #1**;**VLABench IS 63.5 / PS 47.4**(unseen-texture IS +12.6 pp / PS +7.2 pp);ablation:**EAR alone +1.2 pp、IAR alone +1.2 pp、合并 +1.5 pp**;teacher-forcing 稳定训练 | 真机自部署(详见 paper §4.4) |
 | **AgiBot World 2026** | 2026 phased | 1M+ traj | 分 5 阶段发布,Phase 1 重点 imitation learning | 数据集白皮书未与 1.0 做严格 ablation 对比 | — |
 | **Genie Sim 3.0** | 2026.01, [arXiv 2601.02078] | LLM-driven sim + VLM 自动评测 | **200 tasks / 10,000+ hours / 100,000+ 场景**;CES 2026 推出 5,140 验证 3D 资产覆盖零售/工业/餐饮/家庭/办公 | **R²=0.94, slope≈1.025 sim-real 一致性**;sim-only 训练在真机平均 **0.83**,real-to-real 0.75(sim 比 real 训练在 8 任务上更高);**π0.5 / GR00T-N1.6 / π0 三方第三方对照**:Instruction 0.67 / 0.40 / 0.28;Robust 0.77 / 0.48 / 0.34;Manipulation 0.53 / 0.34 / 0.36 [Tab III/IV/V] | G1 / G2 数字孪生 + 真机对照 |
 
@@ -536,7 +573,7 @@ graph LR
 - Being-H0 → Being-H0.5: **Mixture-of-Flow + 统一 EEF 动作空间 + UniHand-2.0(数据 100×)**
 - Being-H0.5 → Being-H0.7: **潜变量 WAM + 200K h ego 视频(数据 ~6×)**
 
-### 2.6 DreamZero / WAM 谱系(NVIDIA)
+### 2.6 DreamZero / WAM 谱系(NVIDIA + 联合)
 
 ```mermaid
 graph LR
@@ -545,6 +582,10 @@ graph LR
   B --> D[GigaWorld-Policy 2026.03<br/>arXiv 2603.17240<br/>9× 推理加速 + 7%]
   B --> E[STARRY 2026.04<br/>arXiv 2604.26848<br/>时空+动作联合去噪<br/>真机 42.5 → 70.8 +28.3 pp]
   B --> F[DreamDojo 2026.02<br/>44K h ego video<br/>10.81 FPS 实时 >1 min]
+  E --> G[X-WAM 2026.04<br/>arXiv 2604.26694<br/>Wan2.2-5B + 4D RGB-D + ANS<br/>RoboCasa 79.2 / RoboTwin 90.7]
+  D --> H[MotuBrain 2026.04<br/>arXiv 2604.27792<br/>Vidu + 三流 MoT + H-Bridge<br/>RoboTwin 95.8/96.1 #1<br/>FP8+CUDA-graph 50x 加速]
+  H --> I[Consistency-Consensus 2026.05<br/>arXiv 2605.07514<br/>action-state consistency 排序<br/>RoboTwin +2.8pp 无训练]
+  E --> I
 ```
 
 | 版本 | 时间 / arXiv | 后端 / 架构 | 关键改动 | 消融数字 | 部署证据 |
@@ -555,15 +596,21 @@ graph LR
 | **GigaWorld-Policy** | 2026.03, [arXiv 2603.17240] | 因果设计;视频生成可选;统一 Transformer 处理观测/state/action | 与 Motus / Cosmos-Policy / π0.5 / X-VLA 在 RoboTwin 2.0 对照 | **9× inference speedup vs Motus,success rate 仍 +7%**;**单次推理 0.36s**;**相对 π0.5 在 RoboTwin 2.0 真实任务上 +95%**(典型 Place Fan:**π0.5 0.25 / X-VLA 0.36 / Motus 0.91 / Ours 0.94**);Pick Dual Bottles: **π0.5 0.10 / X-VLA 0.47 / Motus 0.96 / Ours 0.86** [Table] | 真机 0.36 s 推理 |
 | **STARRY** | 2026.04, [arXiv 2604.26848] | 时空+动作联合扩散去噪,GASAM 把 depth + EE 几何对齐到 token | 同时预测空间-时间未来 latent 与动作序列 | **RoboTwin 2.0 50 个双臂任务 Clean 93.82% / Randomized 93.30%**;**真机平均 success 42.5%(π0.5) → 70.8%(STARRY)**,**+28.3 pp** | 50 个双臂真机+仿真 |
 | **DreamDojo** | 2026.02, [arXiv 2602.06949](https://arxiv.org/pdf/2602.06949) | NVIDIA + USC | 44K 小时第一视角人类视频预训练(15× 时长,2000× 场景) | distillation 后达 **10.81 FPS 实时**,长时自回归 **>1 分钟**稳定 | [HF nvidia/DreamDojo] |
+| **X-WAM** | 2026.04, [arXiv 2604.26694](https://arxiv.org/abs/2604.26694) + [Project](https://sharinka0715.github.io/X-WAM/) | **Wan2.2-TI2V-5B** 视频 DiT 基座 + **轻量深度分支(复制 final blocks)** + **多视角 RGB-D 联合预测** + **Asynchronous Noise Sampling**(联合分布采样 (t_O, t_a) → 推理时动作少步、视频多步,**训练-推理分布对齐**) | **5874 h / 1.49M episodes** robot data PT;earphone packing 真机 20h demo 微调;flow matching 联合视频+深度+动作 | **RoboCasa SOTA 79.2%**;**RoboTwin 2.0 90.7%**(Top3);**4D 重建 visual & geometric 指标超过 Cosmos-Policy / UWM / Motus**;深度分支同时提升 3D 重建 & 策略成功率(消融 Sec 4.3) | real-world earphone packing 验证 |
+| **MotuBrain** | 2026.04, [arXiv 2604.27792](https://arxiv.org/abs/2604.27792) | **Vidu VAE + 5B Vidu DiT** 基座 + **三流 MoT**(text/video/action 独立 transformer)+ **H-Bridge attention**(中间 50% 层全 V-A 联合、两端 25% 层 decoupled);**5 种推理模式同模型支持**(VLA / WM / IDM / VGM / Joint);**4 层数据金字塔**(Internet → ego-centric → heterogeneous → specific) + 两阶段 PT(Stage1 仅视频、Stage2 动作并冻视频) | Action 10-D(pos+6D rot+gripper)相对 EEF;V2A 推理(仅 action 路径)+ chunked AR + LingBot-VA noisy-conditioning(s_aug∼U[0.3,0.7]);推理:denoising 步数缩减 + torch.compile + FP8 量化(per-tensor float8_e4m3fn)+ DiT cache | **RoboTwin 2.0 95.8%(clean)/ 96.1%(randomized)** 综合 #1;Pick Dual Bottles 100% / Place A2B Left 95-100% / 空间编排任务显著领先;**WorldArena 最强 EWMScore**;新本体 50-100 demos 适配;**≥ 50× 端到端推理加速** | 真机部署(具体平台未公开) |
+| **LingBot-VA + Consistency-Consensus** | 2026.05, [arXiv 2605.07514](https://arxiv.org/abs/2605.07514) | **诊断 + test-time selection**(非新模型);action-state consistency \(c_t = \exp(-\alpha \cdot d_{\text{MSE-latent}}(o_{t+\Delta}, \hat{o}_{t+\Delta}))\);用 **Cosmos-Policy**(joint pred)+ **LingBot-VA**(inverse dyn)为代表 WAM | N 次 rollout 按 consistency 排序选最高;**无 reward 模型 / 无训练**;**background collapse** 失败模式由 Δz_t 诊断(低运动场景静态预测取得虚假高 consistency) | **RoboTwin 2.0 90.2 → 93.0 (+2.8 pp)**;RoboCasa 66.6 → 67.3 (+0.7 pp);Cohen's d = 0.76 / 0.99(joint / inverse);AUC = 0.77 / 0.88(成功-失败分类) | 复用 RoboCasa / RoboTwin 2.0 demos,无新真机评测 |
 
 **击败前代/竞品的关键招式**:
 - 朴素 video diffusion → DreamZero: **KV-cache GT 替换 + 视频-动作联合去噪 + 系统级 7 件套加速(38×)**
 - DreamZero → DreamZero-Flash: **解耦 video/action noise schedules + Beta(7,1) + 1-step**
 - DreamZero → GigaWorld-Policy: **去掉强制视频生成 + 因果统一 Transformer**(更快、保持 SOTA)
 - DreamZero → STARRY: **时空联合 + GASAM(depth + EE 几何对齐)**
+- STARRY / GigaWorld → **X-WAM**: **首次把 RGB-D 4D 监督引入 unified WAM + ANS 训练-推理分布对齐**,3D 重建与策略 SR 同时领先
+- DreamZero / GigaWorld → **MotuBrain**: **Vidu + 三流 MoT + H-Bridge + 5 种推理模式共享参数**,RoboTwin 2.0 几乎天花板 95.8/96.1
 - DreamZero → DreamDojo: **44K h ego video 预训(15× 时长) + 蒸馏到 10.81 FPS**
+- STARRY / DreamZero → **Consistency-Consensus**: **零训练 test-time selection**,验证 WAM 已具备「内部一致 ≈ 决策可靠」属性
 
-**部署证据**: NVIDIA 自报 RoboArena #1 / MolmoSpaces #1(无第三方独立验证);DreamDojo 已 HF 发权重。
+**部署证据**: NVIDIA 自报 RoboArena #1 / MolmoSpaces #1(无第三方独立验证);DreamDojo 已 HF 发权重;X-WAM 公开 [Project page](https://sharinka0715.github.io/X-WAM/) 含真机视频;MotuBrain 论文公开 FP8/CUDA-graph 端到端推理细节(可直接用于工业部署);Consistency-Consensus **无新代码**,即插即用于任何 WAM 推理 pipeline。
 
 ### 2.7 NVIDIA Cosmos 谱系
 
@@ -1507,6 +1554,7 @@ graph TD
 | 2601.03044 | SOP(Scalable Online Post-training) | 2026.01 | [arXiv 2601.03044](https://arxiv.org/abs/2601.03044) |
 | 2601.06748 | TT-VLA(Test-Time RL) | 2026.01 | [arXiv 2601.06748](https://arxiv.org/abs/2601.06748) |
 | 2601.08665 | VLingNav(导航 VLA) | 2026.01 | [arXiv 2601.08665](https://arxiv.org/abs/2601.08665) |
+| 2601.11404 | **ACoT-VLA**(AgiBot 动作 CoT,EAR+IAR,LIBERO-Plus #1) | 2026.01 | [arXiv 2601.11404](https://arxiv.org/abs/2601.11404) · [GitHub](https://github.com/AgibotTech/ACoT-VLA) |
 | 2601.12993 | Being-H0.5(BeingBeyond) | 2026.01 | [arXiv 2601.12993](https://arxiv.org/abs/2601.12993) |
 | 2601.20321 | TaF-VLA(触觉-力对齐) | 2026.01 | [arXiv 2601.20321](https://arxiv.org/abs/2601.20321) |
 | 2601.21449 | Nimbus(数据生成 pipeline) | 2026.01 | [arXiv 2601.21449](https://arxiv.org/abs/2601.21449) |
@@ -1553,7 +1601,9 @@ graph TD
 | 2604.19683 | Mask World Model | 2026.04 | [arXiv 2604.19683](https://arxiv.org/abs/2604.19683) |
 | 2604.19728 | VLA Foundry(Toyota Research) | 2026.04 | [arXiv 2604.19728](https://arxiv.org/abs/2604.19728) |
 | 2604.22152 | dWorldEval(WM as evaluator) | 2026.04 | [arXiv 2604.22152](https://arxiv.org/abs/2604.22152) |
+| 2604.26694 | **X-WAM**(清华+小米,Wan2.2-5B + RGB-D 4D WAM + ANS,RoboCasa 79.2 / RoboTwin 90.7) | 2026.04 | [arXiv 2604.26694](https://arxiv.org/abs/2604.26694) · [Project](https://sharinka0715.github.io/X-WAM/) |
 | 2604.26848 | STARRY(双臂时空+动作联合扩散) | 2026.04 | [arXiv 2604.26848](https://arxiv.org/abs/2604.26848) |
+| 2604.27792 | **MotuBrain**(小米,Vidu + 三流 MoT + H-Bridge,RoboTwin 95.8/96.1 #1,WorldArena #1) | 2026.04 | [arXiv 2604.27792](https://arxiv.org/abs/2604.27792) |
 | 2605.00080 | WM 全景 Survey | 2026.05 | [arXiv 2605.00080](https://arxiv.org/abs/2605.00080) |
 | 2605.00416 | LWD(银河通用 16 台双臂 95%) | 2026.05 | [arXiv 2605.00416](https://arxiv.org/abs/2605.00416) |
 | 2605.01772 | Anticipation-VLA(自适应 subgoal) | 2026.05 | [arXiv 2605.01772](https://arxiv.org/abs/2605.01772) |
@@ -1561,6 +1611,7 @@ graph TD
 | 2605.05241 | DexSim2Real(78.2% 真机) | 2026.05 | [arXiv 2605.05241](https://arxiv.org/abs/2605.05241) |
 | 2605.06222 | FFDC(WAM −69% 前向次数) | 2026.05 | [arXiv 2605.06222](https://arxiv.org/abs/2605.06222) |
 | 2605.06481 | OA-WAM(object-addressable slot) | 2026.05 | [arXiv 2605.06481](https://arxiv.org/abs/2605.06481) |
+| 2605.07514 | **Is the Future Compatible?**(NYCU,**LingBot-VA + Consistency-Consensus**,RoboTwin 2.0 93.0% 无训练) | 2026.05 | [arXiv 2605.07514](https://arxiv.org/abs/2605.07514) |
 | 2605.09387 | NEXUS(LLM agent 符号约束) | 2026.05 | [arXiv 2605.09387](https://arxiv.org/abs/2605.09387) |
 | 2605.10332 | EmbodiSkill(skill-aware reflection,93.28%) | 2026.05 | [arXiv 2605.10332](https://arxiv.org/abs/2605.10332) |
 | 2605.10564 | DeepSight(Long-horizon WM 自驾) | 2026.05 | [arXiv 2605.10564](https://arxiv.org/abs/2605.10564) |

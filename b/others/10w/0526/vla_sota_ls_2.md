@@ -107,6 +107,22 @@ survey（vla_sota_ls_2.md）采用的 π0.5 LIBERO 基准是 97.7%（来自 Alle
 - **预训练简介**：三阶段训练流程。预训练阶段（Stage 1）基于 Qwen3-VL-8B 骨干，在 150 万条多机器人 embodiment 的操作数据上使用 flow matching 目标训练 100K 步（64×H200 GPU），学习通用跨 embodiment 操作能力；中训阶段（Stage 2）针对特定 embodiment 强化能力；后训阶段（Stage 3）面向具体任务微调。
 - **提及**：
 
+## 2026-05-XX · Is the Future Compatible?: Diagnosing Dynamic Consistency in World Action Models（LingBot-VA + Consistency-Consensus）
+
+- **提出日期**：2026-05-XX（arXiv 2605.07514）
+- **SOTA**：**RoboTwin 2.0 93.0%**（LingBot-VA + Consistency-Consensus，**无需训练**）；进入综合 Top3
+- **Benchmark**：RoboCasa 67.3%（66.6 → 67.3，+0.7pp，无训练）；Cosmos-Policy AUC 0.77 / LingBot-VA AUC 0.88（成功/失败分类）
+- **Other Benchmark**：Cohen's d = 0.76（joint-prediction）/ 0.99（inverse-dynamics）—— 一致性 z-score 在两类 WAM 上都显著分离成功/失败 episode
+- **比 Pi0.5 好**：（诊断+测试时方法，非新模型；不与 π0.5 直接对比）
+- **简介**：**诊断 + value-free 测试时选择** 双重贡献。提出 **action-state consistency** \(c_t = \exp(-\alpha \cdot d(o_{t+\Delta}, \hat{o}_{t+\Delta}))\) 作为 WAM 可靠性指标；在 latent space 用 MSE 衡量预测帧与真实帧距离。揭示 **background collapse** 失败模式：低动态轨迹的静态预测取得虚假高 consistency，需用 Δz_t 作诊断。**Consistency-Consensus**：N 次 rollout 按 consistency 排序选最高 → 无需 reward / value head 即可显著涨分。
+- **相关资料**：[PDF](https://arxiv.org/pdf/2605.07514) · [abs](https://arxiv.org/abs/2605.07514) · [HTML](https://arxiv.org/html/2605.07514v1)
+- **数据规模**：复用 RoboCasa / RoboTwin 2.0 已有 demos，**无新训练数据**；评测覆盖 Cosmos-Policy（joint pred）+ LingBot-VA（inverse dyn）两个代表 WAM
+- **模型大小**：**0 新参数**（test-time selection）；底层用 Cosmos-Policy(NVIDIA, ~2B+DiT) + LingBot-VA 预训练 checkpoint
+- **算力**：**无训练算力**；推理时按 K 次 rollout 选最优，单位 RoboCasa/RoboTwin 任务 K=5–10 即可
+- **世界模型用法**：**评价 WAM 一致性**：把 WAM 的「预测未来 + 推断动作」组合视作 imagination 通道，用一致性度量自带的「内部一致 ≈ 决策可靠」假设作 test-time ranking。**正面**：RoboTwin 2.0 +2.8pp、RoboCasa +0.7pp（Sec 3.3 Table）；**反面**：background collapse 时一致性会反向（低运动任务如 TurnOnSinkFaucet 上反例）。
+- **预训练简介**：无独立预训练阶段。基于已有 Cosmos-Policy（NVIDIA RoboCasa pretrain）和 LingBot-VA（小米 RoboTwin 2.0 pretrain）两个 WAM checkpoint 做 zero-training 诊断和 test-time 选择，方法本身无新模型权重。
+- **提及**：
+
 ## 2026-05-04 · MolmoAct2: Action Reasoning Models for Real-world Deployment
 
 - **提出日期**：2026-05-04（arXiv 2605.02881）
@@ -138,6 +154,38 @@ survey（vla_sota_ls_2.md）采用的 π0.5 LIBERO 基准是 97.7%（来自 Alle
 - **世界模型用法**：未使用。
 - **预训练简介**：无独立预训练阶段。LWD 是一个后训练框架，直接以预训练好的 π0.5 模型为基础，通过 offline-to-online 强化学习在部署过程中持续改进策略。
 - **提及**：√
+
+## 2026-04-30 · MotuBrain: An Advanced World Action Model for Robot Control
+
+- **提出日期**：2026-04-30（arXiv 2604.27792）
+- **SOTA**：**RoboTwin 2.0 综合榜 #1**：clean **95.8%** / randomized **96.1%**；**WorldArena 最强 EWMScore**（论文自报）
+- **Benchmark**：RoboTwin 2.0 Pick Dual Bottles 100%、Place A2B Left/Right 95–100%、Blocks Ranking Size / Move Can Pot / Place Can Basket 等空间编排任务显著领先；新本体 humanoid 适配仅需 **50–100 demos**
+- **Other Benchmark**：5 种推理模式同模型支持（VLA / WM / IDM / VGM / Joint）；视频自回归滚动支持长程；FP8 + CUDA-graph + DiT cache 后 **≥ 50× 端到端推理加速**
+- **比 Pi0.5 好**：RoboTwin 2.0 较 π0 30%+ 提升（π0.5 未单独公开 RoboTwin 数）
+- **简介**：**Vidu 视频基座 + 三流 MoT（text/video/action）+ H-Bridge attention**（中间 50% 层全 V-A 联合注意、两端 25% 层 decoupled）实现 5 种预测模式统一。**四层数据金字塔**（Internet videos → ego-centric → heterogeneous embodiment → specific embodiment），两阶段 PT（Stage1 仅训视频分支、Stage2 训动作分支冻视频）。**Action 10-D**（pos + 6D rot + gripper），相对 EEF 表示便于跨本体。Loss = λ_v L_v + λ_a L_a（独立 SNR timestep：video timeshift=6 / action timeshift=1）。推理 stack：denoising 步数缩减 + V2A 异步（仅 action 分支）+ chunk-level RTC + torch.compile + FP8 量化（per-tensor scale，float8_e4m3fn）+ DiT cache。消融：**H-Bridge 中间联合层** 是跨模态对齐关键；**Non-AR + AR 后训** 分别覆盖短程精度 / 长程序贯。
+- **相关资料**：[PDF](https://arxiv.org/pdf/2604.27792) · [abs](https://arxiv.org/abs/2604.27792) · [HTML](https://arxiv.org/html/2604.27792v1)
+- **数据规模**：**Internet 视频（亿级）→ Ego-centric → 异构本体双臂数据 → 特定本体（50–100 demos 即可适配新平台）**；具体 Stage2 / Specific stage 总小时数未在 abstract / 方法主表完整公开（详见 paper.pdf §2.2）
+- **模型大小**：Vidu VAE + Vidu DiT 基座（5B 量级，Wan2.2 同代）+ 三流 MoT（text / video / action 各自独立 transformer 参数）+ Action 10-D head；**视频分支训练时冻 + 动作分支微调** 在 Stage2 / 后训降参数学习面
+- **算力**：原文未在 abstract 直接给 GPU·hour；**FP8 + CUDA-graph 推理 50×+ 加速** 表明面向真实部署（推断端 single-GPU 路径）；具体 PT GPU 数量与 wall-time 详见 paper.pdf §2.2-2.3 表
+- **世界模型用法**：**视频分支即 WM**：联合预测未来视频 + 动作；推理时 V2A 可只取 action 路径（不解码视频）。**正面**：Stage1 视频 PT 使 Stage2 动作分支从随机初始化下快速收敛；H-Bridge 让浅深层保留模态特异性、中间层做强 V-A 对齐。**反面**：完整联合 V-A 注意成本高，必须 H-Bridge / decoupled 才能跑生产级。
+- **预训练简介**：**完整两阶段 PT**。Stage1 仅训视频分支（在 ego-centric + heterogeneous embodiment 数据上），目标只含 video MSE loss，加 **LingBot-VA noisy-conditioning**（s_aug ∼ U[0.3, 0.7]）+ 多视角随机 drop 概率 0.1 提升鲁棒性；Stage2 冻视频分支、训动作分支（仍维持联合 V-A 优化以保对齐），统一相对 EEF action 表征。
+- **提及**：
+
+## 2026-04-29 · X-WAM: Unified 4D World Action Modeling from Video Priors with Asynchronous Denoising
+
+- **提出日期**：2026-04-29（arXiv 2604.26694）
+- **SOTA**：**RoboCasa SOTA 79.2%**（全局 #1）、**RoboTwin 2.0 90.7%**（Top3 区间）
+- **Benchmark**：4D 重建 + 视频生成在 visual & geometric 指标上均超过先前 WAM；real-world earphone packing 用 ~20h demo 即可微调成功
+- **Other Benchmark**：与 Cosmos-Policy / UWM / Motus 等 2D unified WAM 在 RoboCasa 上明显拉开差距；ANS 训练-推理分布对齐使加速无质量损失
+- **比 Pi0.5 好**：RoboCasa 较 π0 62.5% **+16.7pp**；同等 RoboTwin 区间下显著超 2D 统一 WAM
+- **简介**：**X-WAM = Wan2.2-TI2V-5B + 轻量深度分支（复制 final DiT blocks）+ 多视角 RGB-D 联合预测 + ANS**。两大创新：(1) **结构性轻量 3D 适配**：不沿序列拼接深度 token（避免 attention 二次代价），不沿通道拼接（避免破坏预训练分布），改为「复制最后几层 DiT 作 dedicated depth branch」保留视觉先验；(2) **Asynchronous Noise Sampling**：训练时从 (t_O, t_a) 联合分布采样 → 与推理时「动作少步去噪、视频多步去噪」分布对齐；解决独立采样导致 train-test gap。消融：深度监督 **同时提升** 3D 重建质量与策略成功率，验证 spatial supervision 多目标受益。
+- **相关资料**：[PDF](https://arxiv.org/pdf/2604.26694) · [abs](https://arxiv.org/abs/2604.26694) · [HTML](https://arxiv.org/html/2604.26694v1) · [Project](https://sharinka0715.github.io/X-WAM/)
+- **数据规模**：**5874 小时 / 1.49M episodes** 真机+仿真多本体数据集（Sec 3）；real-world earphone packing **~20h demo** 320×256 分辨率
+- **模型大小**：**Wan2.2-TI2V-5B** 视频 DiT 基座 + 轻量深度分支（仅复制 final few blocks，可视为 base 之上 ~5–10% 参数增量）；flow matching 联合优化视频+动作
+- **算力**：原文未在 abstract 给出明确 GPU·hour；Wan2.2-5B 基座规模下 5874h 数据 PT 估约万级 GPU·hour 区间（详见 paper.pdf §3.4 Training Details）
+- **世界模型用法**：**多视角 RGB-D WAM**：联合预测未来 RGB + 深度 + 动作。WM 是策略核心而非辅助。**正面**：深度分支提升 3D 一致性与策略成功率双指标；ANS 让训练-推理分布一致，加速无损。**反面**：深度分支增加额外去噪监督，需要 RGB-D 数据（部分真机数据集无深度）。
+- **预训练简介**：**5874h robot data 大规模 PT**。基座 Wan2.2-TI2V-5B 已在 Internet 视频上预训练；X-WAM 在其上用 **flow matching** 联合训视频分支、深度分支与动作分支，采用 ANS 联合 timestep 采样替代独立采样。后续在下游 benchmark 各任务用少量 demo（如 earphone packing 20h）微调。
+- **提及**：
 
 ## 2026-04-30 · PRTS: A Primitive Reasoning and Tasking System via Contrastive Representations
 
@@ -987,6 +1035,22 @@ survey（vla_sota_ls_2.md）采用的 π0.5 LIBERO 基准是 97.7%（来自 Alle
 - **预训练简介**：有大规模预训练阶段。基于 InternVL-3.5 视觉语言骨干，采用 Mixture-of-Transformers（MoT）架构和 Mixture-of-Flow 动作头，在 UniHand-2.0 数据集上进行预训练，该数据集包含来自 30 种具身、超过 3.5 万小时的操作数据。设计统一动作空间（Unified Action Space）将不同具身的动作映射到统一表征，预训练使用 flow matching 损失，支持跨具身泛化和少样本迁移。
 - **提及**：√
 
+## 2026-01-XX · ACoT-VLA: Action Chain-of-Thought for Vision-Language-Action Models
+
+- **提出日期**：2026-01-XX（arXiv 2601.11404）
+- **SOTA**：**LIBERO-Plus 2026 H1 SOTA 87.5%**（全局 #1，附录 A 已录入）
+- **Benchmark**：LIBERO 平均 +1.6pp over π0.5（LIBERO-Long 提升显著）；**VLABench**：IS **63.5%** / PS **47.4%**（unseen-texture 子集 IS +12.6pp / PS +7.2pp）
+- **Other Benchmark**：真机平台 multi-task 训练 + 自部署评测（详见 paper §4.4）；与 Language CoT / Visual CoT 在 LIBERO-Long 上对比显著领先
+- **比 Pi0.5 好**：LIBERO 平均 **+1.6pp**；LIBERO-Plus **+1.0pp** 同条件下；VLABench IS +12.6pp unseen-texture
+- **简介**：**Action-space Chain-of-Thought** 新范式（区别于 Language CoT 与 Visual CoT），把 "thought" 重定义为「结构化的 explicit action intents」。架构 = **π0.5 base + EAR（Explicit Action Reasoner）+ IAR（Implicit Action Reasoner）+ AGP（Action-Guided Prediction）head**。**EAR**：18 层轻量 Transformer，self-attn 捕时间依赖 + cross-attn 从 VLM 各层 KV cache 注入多模态先验，flow-matching 输出 coarse 参考轨迹 a^ref（H_ref=15, shift=2）；**IAR**：每 VLM 层学一个查询 Q_i（M=1，d'=128 降维），cross-attn 提取潜在动作先验。**AGP**：把 EAR 显式参考 + IAR 隐式先验融入 denoising 条件。消融：**EAR 单独 +1.2pp、IAR 单独 +1.2pp、两者叠加再 +0.3pp**；teacher-forcing 训练稳定性显著好。
+- **相关资料**：[PDF](https://arxiv.org/pdf/2601.11404) · [abs](https://arxiv.org/abs/2601.11404) · [HTML](https://arxiv.org/html/2601.11404v1) · [GitHub](https://github.com/AgibotTech/ACoT-VLA)
+- **数据规模**：仿真三 benchmark 严格走官方 split（LIBERO / LIBERO-Plus / VLABench），无额外数据；真机部分论文自采（具体小时数详见 paper Appendix A）
+- **模型大小**：基座 π0.5（**SigLIP 视觉 + Gemma-2B**，N=18 层、d=2048）；EAR 18 层轻量 Transformer；IAR 学习查询 + 降维 d'=128
+- **算力**：训练 **8×NVIDIA H100 单节点 bf16**；推理 **单卡 RTX 4090**（Sec 4.1 Implementation Details）；LR cosine + 10K-step warmup + peak 5e-5 + 10K decay；AdamW + grad-norm-clip 1.0；EMA decay 0.999
+- **世界模型用法**：未使用。本文论证「**Action-space CoT 优于 Visual CoT**」，明确把 World-model-based policies（CoT-VLA / DreamVLA / WorldVLA）作为对比基线，指出 vision-level guidance 仍是 indirect representation；本文用动作空间显式 + 隐式 reasoner 替代 WM 提供的视觉/语言 intermediate。
+- **预训练简介**：无独立预训练阶段。直接复用 π0.5（即 SigLIP + Gemma-2B + flow-matching action head）作为 backbone，新增 EAR + IAR 模块从零训，整体在三 benchmark 各自训练 split 上 supervised + flow matching 训练（标准 cosine LR + warmup 配方）。
+- **提及**：
+
 ## 2026-01-XX · LingBot-VLA / A Pragmatic VLA Foundation Model
 
 - **提出日期**：2026-01（arXiv 2601.18692）
@@ -1217,19 +1281,19 @@ survey（vla_sota_ls_2.md）采用的 π0.5 LIBERO 基准是 97.7%（来自 Alle
 
 ## 附录 B · 论文统计
 
-- 主索引共 **70 篇 unique 论文**（去重：源文件第 35 行 `Cosmos Policy + World2Act` 与第 30 行 World2Act 合并、与第 40 行 Cosmos Policy 合并；另补 Being-H0.7 / DM0）。
+- 主索引共 **74 篇 unique 论文**（去重：源文件第 35 行 `Cosmos Policy + World2Act` 与第 30 行 World2Act 合并、与第 40 行 Cosmos Policy 合并；另补 Being-H0.7 / DM0；2026-05 追加 Consistency-Consensus；2026-04 追加 MotuBrain / X-WAM；2026-01 追加 ACoT-VLA）。
 - 「提及」列 √ 共 **38 篇**（覆盖：源文件第 19、26（待考量）、35、40、50（部分）、52–58 子表头、104–139 补漏节、147–152 用户追加节中显式 √ 的条目）。
 - 时间分布：
-  - 2026-05：5 篇（OA-WAM / ConsisVLA-4D / RLDX-1 / MolmoAct2 / LWD）
-  - 2026-04：15 篇（PRTS / Being-H0.7 / STARRY / LoHo-Manip / PokéVLA / VLA Foundry / MWM / π0.7 / ReconVLA / HAMLET / StarVLA-α / STRONG-VLA / HiF-VLA / HY-Embodied-0.5 / HiPolicy）
+  - 2026-05：6 篇（OA-WAM / ConsisVLA-4D / RLDX-1 / MolmoAct2 / LWD / **Consistency-Consensus**）
+  - 2026-04：17 篇（**MotuBrain** / **X-WAM** / PRTS / Being-H0.7 / STARRY / LoHo-Manip / PokéVLA / VLA Foundry / MWM / π0.7 / ReconVLA / HAMLET / StarVLA-α / STRONG-VLA / HiF-VLA / HY-Embodied-0.5 / HiPolicy）
   - 2026-03：18 篇（Psi-R2 博客 / FocusVLA / BTK / VLA-OPD / ELITE / P3Nav / GigaWorld-Policy / MolmoB0T / Fast-WAM / SmoothVLA / Ψ0 / World2Act / FutureVLA / TiPToP / GST-VLA / NS-VLA / SACA / EZ-M）
   - 2026-02：16 篇（WoVR / DM0 / Xiaomi-Robotics-0 / ABot-M0 / MINT / VLA-JEPA / DreamZero / World-VLA-Loop / VLAW / VLANeXt / SimVLA / Green-VLA / GeneralVLA / LifeLong-RFT / QuantVLA / LAP）
-  - 2026-01：9 篇（Cosmos Policy / Pose-VLA / Being-H0.5 / LingBot-VLA / SOP / TT-VLA / Genie Sim 3.0 / Helix 02 / CycleVLA）
+  - 2026-01：10 篇（**ACoT-VLA** / Cosmos Policy / Pose-VLA / Being-H0.5 / LingBot-VLA / SOP / TT-VLA / Genie Sim 3.0 / Helix 02 / CycleVLA）
   - 2025-12：2 篇（GR00T N1.6 / OXE-AugE）
   - 2025-11：1 篇（π*0.6 / Recap）
   - 2025-10：2 篇（X-VLA / CoLA-World）
   - 2025-09：2 篇（FLOWER / RealMirror）
-- 合计 **70 篇**。
+- 合计 **74 篇**。
 
 ---
 
@@ -1242,16 +1306,3 @@ survey（vla_sota_ls_2.md）采用的 π0.5 LIBERO 基准是 97.7%（来自 Alle
 5. **新综合框架**：VLA-Arena / CEBench（2025.12–2026）。
 6. **MolmoAct2 与 MolmoB0T 为不同论文**，勿混淆（前者 Allen AI ARM 推理型；后者 Allen AI 纯仿真训练 + 真机 zero-shot 79.2%）。
 
-# TODO
-- [MotuBrain: An Advanced World Action Model for Robot Control](https://arxiv.org/abs/2604.27792),RoboTwin 2.0 在26H1的 SOTA
-- X-WAM: [Unified 4D World Action Modeling from Video Priors with Asynchronous Denoising](https://arxiv.org/abs/2604.26694), RoboCasa 和 RoboTwin 2.0 在26H1的 SOTA
-- LingBot-VA + Consistency-Consensus: [Is the Future Compatible? Diagnosing Dynamic Consistency in World Action Models](https://arxiv.org/abs/2605.07514), 无需训练拿 RoboCasa 和 RoboTwin 2.0 在26H1的 SOTA
-- [ACoT-VLA: Action Chain-of-Thought for Vision-Language-Action Models](https://arxiv.org/abs/2601.11404)
-
-请把下面四篇论文下载到 @p/ 对应的子文件夹中, 子文件夹的按照以前的规则命名:
-- [MotuBrain: An Advanced World Action Model for Robot Control](https://arxiv.org/abs/2604.27792),别名:MotuBrain, RoboTwin 2.0 在2026年上半年的 SOTA
-- [Unified 4D World Action Modeling from Video Priors with Asynchronous Denoising](https://arxiv.org/abs/2604.26694), 别名:X-WAM, RoboCasa 和 RoboTwin 2.0 在2026年上半年的 SOTA
-- [Is the Future Compatible? Diagnosing Dynamic Consistency in World Action Models](https://arxiv.org/abs/2605.07514), 有个模型叫`LingBot-VA + Consistency-Consensus`. 无需训练拿 RoboCasa 和 RoboTwin 2.0 在2026年上半年的 SOTA.
-- [ACoT-VLA: Action Chain-of-Thought for Vision-Language-Action Models](https://arxiv.org/abs/2601.11404), 别名:ACoT-VLA, LIBERO-Plus 在2026年上半年的 SOTA.
-
-然后深入分析这四篇论文, 以及它们相关的project website, GitHub code repo, GitHub中的Issues 和 网上相关的文章等等. 把它们按各篇文章现有的规范和写法加入到 @vla_sota_ls_2.md , @VLAWAM_mdl_opti_op47_1.md , @wam_0.d , @vla_trainds.md , @vla_trainmdl.md , @vla_trainmth_op47.md , @vla_traintask.md , @pt_trainmth.md 这八篇文章中.  也就是说, 要深入分析和抽取v汇总这八篇文章所需要的内容, 然后把内容插到个篇文章对应的位置, 比如, 包含但不限于, 按提出时间排序的位置, 从不同角度和观点分类的位置, 按不同benchmark(算法效果, 计算速度等方面)进行排名的位置等等. 为了完成这个任务, 你可以利用 @scripts/ 中已有的脚本, 或者改良它们, 或者新建脚本. 关键是紧贴目标, 规范, 和实际情况与真实文档内容, 不要漏写更不要错些. 任务完成后, 总结一下你一步一步做了什么, 比如用了什么脚本做了什么事情, 得到什么内容, 改了什么文档的什么内容等.

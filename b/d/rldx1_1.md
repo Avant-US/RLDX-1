@@ -442,7 +442,7 @@ RLDX-1 的每次推理是 short-prefill 工作负载(非自回归生成), 序列
 ### 6.1 仿真基准
 
 | 基准 | RLDX-1 | $\pi_{0.5}$ | GR00T N1.6 | GR00T N1.5 | $\pi_0$ | $\pi_0$-FAST |
-|------|--------|------------|-----------|-----------|--------|------------|
+|------|--------|------------|-----------|-----------|--------|------------|F
 | **LIBERO Avg** | **97.8** | 96.9 | 96.7 | 86.5 | 94.1 | 85.5 |
 | **LIBERO-Plus** | **86.7** | 86.5 | 72.6 | 66.3 | 54.6 | 64.2 |
 | **SIMPLER Google-VM** | **81.5** | 72.7 | 76.1 | 52.4 | 58.8 | 61.9 |
@@ -9205,3 +9205,2142 @@ uv run torchrun --nproc_per_node=8 rldx/experiment/launch_train.py \
 | 设计分析 | 无 | 6 优点 + 5 缺点 + 6 方法对比表 |
 | 实验分析 | 未涉及 | 3 个 memory 任务的详细分析 + Cup Swapping 低性能原因 |
 | 声明验证 | 无 | Ch.2.4 逐条 + Ch.11.3 逐条验证 |
+
+---
+
+## 21. Post-Training: RECAP RL + 自适应数据收集 深度实现分析
+
+> **实现状态**: ❌ **RECAP RL 完全未实现** (Paper-Only). 代码库中存在完整的 **Rollout 评估基础设施** (✅), 可支撑未来 RECAP 数据收集, 但 RL 训练的核心组件 (VLM Critic、Advantage 估计、Advantage-conditioned Loss、迭代编排) 均不存在.
+>
+> **关联章节**: Ch.4.4 (概述), Ch.6.3 (Light Bulb Twisting 实验), Ch.9 (关键贡献 #3), Ch.18 (MCF, 同为 Paper-Only).
+>
+> **分析方法**: 类似 Ch.18 的混合模式 — 论文算法深度解析 + 代码基础设施映射 + 实现差距分析.
+
+### 21.1 动机与问题定义
+
+#### 21.1.1 为什么需要 RL Post-Training
+
+行为克隆 (BC) 是 VLA 模型训练的主流范式, 但存在根本性局限:
+
+1. **分布偏移 (Distribution Shift)**: BC 策略只在训练分布内准确, 一旦偏离演示轨迹分布, 误差会累积放大 (covariate shift). 实际部署时, 微小的感知噪声或环境变化就可能使机器人进入训练未覆盖的状态空间.
+
+2. **模仿学习的天花板**: BC 的理论最优解是专家策略, 但实际演示数据本身可能不最优 — 人类遥操作通常包含犹豫、试错、冗余动作. BC 只能学到"像人类一样操作", 而非"最优地操作".
+
+3. **样本效率问题**: 对于精密操作 (如 Light Bulb Twisting), 成功操作的容错窗口极窄. 纯 BC 需要大量高质量演示才能覆盖足够的成功模式, 数据收集成本极高.
+
+RL Post-Training 的核心思路: 在 BC 预训练的基础上, 通过环境交互和奖励信号进一步优化策略, 突破 BC 的天花板.
+
+#### 21.1.2 三阶段训练管线中的定位
+
+```
+Pre-Training (100K steps, 64×H200)
+    ↓ 通用能力
+Mid-Training (25K steps, 64×H200)
+    ↓ 功能模块 (Memory/Motion/Physics)
+Post-Training (Fine-tuning + RL)     ← 本章焦点
+    ├── Supervised Fine-Tuning: ✅ 代码已实现
+    └── RECAP RL: ❌ 论文描述, 代码未实现
+```
+
+Post-Training 在 RLDX-1 的训练管线中是最终阶段, 目标是:
+- **Supervised Fine-Tuning**: 在特定任务/embodiment 的小规模高质量数据上微调 (代码已实现, `setup.py:323`)
+- **RECAP RL**: 通过自我改进闭环进一步提升策略质量 (论文描述, 代码不存在)
+
+#### 21.1.3 自适应数据收集 vs RL 的互补关系
+
+论文的 Post-Training 方案实际包含两个相辅相成的组件:
+
+| 组件 | 角色 | 类比 |
+|------|------|------|
+| 自适应数据收集 | 扩展训练分布 (更多场景 + 失败模式覆盖) | "给学生更多习题" |
+| RECAP RL | 从交互经验中学习 (advantage 加权, 自我改进) | "让学生从考试中反思" |
+
+两者的循环: 自适应收集提供更多数据 → RECAP 利用数据优化策略 → 优化后的策略暴露新的失败模式 → 收集更多针对性数据 → 迭代.
+
+### 21.2 自适应数据收集协议
+
+#### 21.2.1 两阶段数据收集流程 [论文描述]
+
+论文 Section 4.4 描述了一个结构化的数据收集协议:
+
+**阶段 1: Base 数据收集**
+
+定义遥操作场景时, 区分两类因素:
+- **一致性因素 (Consistency Factors)**: 每次演示应保持一致的元素 — 抓取姿势、运动轨迹规划、执行顺序
+- **变化因素 (Variation Factors)**: 每次演示应随机变化的元素 — 物体位姿、初始配置、等待时间
+
+这种区分的核心设计理由: 一致性因素让策略学到稳定的操作模式, 变化因素让策略学到泛化能力. 如果什么都随机, 策略难以收敛; 如果什么都固定, 策略无法泛化.
+
+**阶段 2: Refinement 数据收集**
+
+```mermaid
+graph TD
+    A[训练 BC 策略] --> B[部署到环境]
+    B --> C[运行 Rollout<br>收集成功/失败数据]
+    C --> D{分析失败模式}
+    D -->|识别失败类型| E[扩展场景定义<br>添加针对性变化]
+    E --> F[收集新演示数据<br>覆盖失败场景]
+    F --> G[合并新数据到训练集]
+    G --> A
+    D -->|性能满意| H[结束迭代]
+```
+
+#### 21.2.2 代码中的 Rollout 基础设施 ✅
+
+虽然自适应数据收集的**自动化编排**不存在, 但代码库提供了完整的 **Rollout 评估基础设施**, 是未来实现自适应收集的关键基础:
+
+```mermaid
+sequenceDiagram
+    participant Runner as run_rollout_gymnasium_policy
+    participant Env as VectorEnv (n_envs)
+    participant Policy as RLDXPolicy / PolicyServer
+    participant CSV as CSV Logger
+    participant Video as VideoRecorder
+
+    Runner->>Env: gym.make() × n_envs
+    Runner->>Runner: session_ids = UUID per env
+
+    loop while completed_episodes < n_episodes
+        Runner->>Policy: get_action(obs, options)
+        Note over Policy: options = {reset_memory, session_ids}
+        Policy-->>Runner: actions
+        Runner->>Env: env.step(actions)
+        Env-->>Runner: obs, rewards, terms, truncs, infos
+
+        loop for each env_idx
+            Runner->>Runner: success |= info["success"]
+            alt episode ended
+                Runner->>CSV: _update_prediction_csv(success, reward, steps)
+                Runner->>Video: 保存视频 (success/failure 后缀)
+                Runner->>Runner: reset trackers, is_first_step = True
+            end
+        end
+    end
+```
+
+**核心代码路径**: `rollout_policy.py:333-613`
+
+```python
+# rollout_policy.py:333 — 函数签名
+def run_rollout_gymnasium_policy(
+    env_name: str,
+    policy: BasePolicy,
+    wrapper_configs: WrapperConfigs,
+    n_episodes: int = 10,
+    n_envs: int = 1,          # 向量化并行环境数
+    video_dir: str | None = None,
+    seed: int = 42,
+    ...
+) -> Any:
+```
+
+**成功追踪机制** (`rollout_policy.py:502-530`):
+
+```python
+# 两层成功检测: step-level info + final_info
+for env_idx in range(n_envs):
+    if "success" in env_infos:
+        env_success = env_infos["success"][env_idx]
+        # 处理 list/ndarray/bool/int 多种类型
+        current_successes[env_idx] |= bool(env_success)   # OR-累积
+
+    if "final_info" in env_infos and ...:
+        env_success = env_infos["final_info"][env_idx]["success"]
+        current_successes[env_idx] |= bool(env_success)   # 双重检查
+```
+
+OR-累积语义: 一个 episode 中任何时间步的 `success=True` 都算成功. 这对 RECAP 很关键 — 成功/失败标签是筛选 $D_{\text{succ}}$ 的基础.
+
+**数据记录格式** (`rollout_policy.py:616-651`):
+
+```python
+# CSV 字段
+columns = ["env_idx", "episode_idx", "success", "reward", "steps", "video_path"]
+
+# 视频命名: 自动标注成功/失败
+video_path = f"{env_name}_env{env_idx:02d}_episode{ep:02d}_{result_stem}.mp4"
+# result_stem = "success" | "failure"
+```
+
+**Session 管理** (`rollout_policy.py:454-457`):
+
+```python
+session_ids = [f"{env_name}_env{idx}_{uuid.uuid4().hex[:8]}" for idx in range(n_envs)]
+# 每个并行环境独立的 session ID, 与 SessionRegistry (Ch.20) 对接
+```
+
+#### 21.2.3 代码中的 Post-Training 配置 ✅
+
+代码中"Post-Training"的含义是**标准 Supervised Fine-Tuning**, 不是 RL:
+
+```python
+# setup.py:323-326 — Post-training 配置覆盖
+# Override old arguments for post-training
+model.config.general_embodiment_train_ratio = (
+    self.config.model.general_embodiment_train_ratio
+)
+```
+
+```python
+# embodiment_tags.py:32
+# New embodiment during post-training
+```
+
+这些代码仅做配置参数覆盖 (如 embodiment 混合比例调整), 训练仍使用标准 MSE flow-matching loss (`rldx.py:438`):
+
+```python
+# rldx.py:438 — 唯一的训练损失
+action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * loss_mask
+loss = action_loss.sum() / (loss_mask.sum() + 1e-6)
+```
+
+没有任何 advantage 加权、reward 信号、critic loss, 或 RL 相关的训练逻辑.
+
+#### 21.2.4 实现差距分析
+
+| 自适应数据收集需要 | 代码中有 | 状态 |
+|-------------------|---------|------|
+| 策略部署到环境 | `run_rollout_gymnasium_policy()` | ✅ |
+| 成功/失败标签 | `info["success"]` OR-累积 | ✅ |
+| 轨迹录制 | `VideoRecordingWrapper` + CSV | ✅ |
+| 并行环境 | `AsyncVectorEnv` (n_envs) | ✅ |
+| 失败模式自动分析 | — | ❌ |
+| 场景定义自动扩展 | — | ❌ |
+| 数据收集↔训练闭环编排 | — | ❌ |
+| 新数据自动合并到训练集 | — | ❌ |
+
+### 21.3 RECAP 算法深度解析 [论文 Only ❌]
+
+#### 21.3.1 RECAP 原理 (Amin et al., 2025)
+
+RECAP (Reward-weighted Actor-Critic with Advantage Conditioning) 是一种离线/近在线 RL 方法, 专为机器人策略优化设计. 它的核心思想是: **不直接优化 RL 目标 (如 PPO 的 clipped surrogate), 而是用 advantage 值加权 BC loss**, 使策略更关注高质量动作.
+
+**数学形式化**:
+
+标准 BC 损失 (RLDX-1 中的 flow-matching 形式):
+
+$$\mathcal{L}_{\text{BC}}(\theta) = \mathbb{E}_{(s,a) \sim D} \left[ \| v_\theta(x_t, t \mid s) - (x_1 - x_0) \|^2 \right]$$
+
+其中 $v_\theta$ 是 flow-matching 速度场, $x_0 \sim \mathcal{N}(0, I)$, $x_1 = a$ (目标动作).
+
+RECAP 的 advantage-conditioned 损失:
+
+$$\mathcal{L}_{\text{RECAP}}(\theta) = \mathbb{E}_{(s,a) \sim D} \left[ w(A(s,a)) \cdot \| v_\theta(x_t, t \mid s) - (x_1 - x_0) \|^2 \right]$$
+
+其中:
+- $A(s, a)$: advantage 值, 由 VLM Critic 估计
+- $w(\cdot)$: 权重函数, 将 advantage 转化为正权重
+
+权重函数的常见选择:
+
+$$w(A) = \frac{\exp(A / \tau)}{\mathbb{E}[\exp(A / \tau)]} \quad \text{(指数加权, 温度 } \tau \text{)}$$
+
+或:
+
+$$w(A) = \max(A, 0) \quad \text{(ReLU 截断, 仅保留正 advantage)}$$
+
+**与其他方法的区别**:
+
+| 方法 | 核心机制 | RLDX-1 适用性 |
+|------|---------|--------------|
+| PPO/SAC | On-policy/Off-policy RL, 需要大量环境交互 | 不适合: 真机交互昂贵 |
+| DAgger | 迭代收集 + 专家纠正 | 部分: 需要人类专家在线 |
+| RLHF/DPO | 偏好比较 (pairwise), 适合文本 | 不适合: 连续动作空间 |
+| GRPO | Group Relative Policy Optimization | 可能适合, 但需要分组采样 |
+| **RECAP** | **Advantage-conditioned BC** | **适合: 离线兼容, 稳定, 数据高效** |
+
+RECAP 的关键优势: 它保持了 BC 的训练稳定性 (不需要 on-policy 采样), 同时通过 advantage 加权引入了"好动作学更多, 差动作学更少"的信号.
+
+```mermaid
+graph TD
+    subgraph "RECAP 训练循环"
+        A["演示数据 D_l"] --> B["训练 VLM Critic V"]
+        B --> C["标注 Advantage<br>A ← V(D_l)"]
+        C --> D["Advantage-conditioned<br>训练策略 π"]
+        D --> E["策略 Rollout<br>D_l ← D_l ∪ π.rollout()"]
+        E --> F["筛选成功轨迹<br>D_succ ← filter(D_l)"]
+        F --> G["精调 Critic<br>在 D_succ 上"]
+        G --> H["重新标注<br>A ← V(D_l)"]
+        H --> I["精调策略<br>在 D_l + A 上"]
+        I --> E
+    end
+
+    style B fill:#f9d,stroke:#333
+    style D fill:#9df,stroke:#333
+    style F fill:#fd9,stroke:#333
+```
+
+#### 21.3.2 RLDX-1 的 RECAP 伪代码逐步解析
+
+Section 4.4 给出的算法伪代码:
+
+```
+Algorithm: RECAP Post-Training
+1. 在演示数据 D_l 上训练 Critic V
+2. 用 V 标注优势值 A ← V(D_l)
+3. 用带优势标签的数据训练策略 π
+4. for i = 1 to N:
+     D_l ← D_l ∪ π.rollout()     // 收集新轨迹
+     D_succ ← 筛选成功轨迹
+     在 D_succ 上精调 V
+     重新标注 A ← V(D_l)
+     在 D_l + A 上精调 π
+```
+
+**逐步分析**:
+
+**Step 1**: 初始 Critic 训练. VLM Critic (gemma3-4b-it) 在演示数据上学习值函数 $V(s)$. 使用文本预测接口 (见 21.4), 不新增回归头.
+
+**Step 2**: Advantage 标注. 对 $D_l$ 中每个 $(s_t, a_t)$ 对计算 advantage $A(s_t, a_t)$. 由于 Critic 预测的是状态值 $V(s)$, advantage 需要结合 reward:
+
+$$A(s_t, a_t) = r(s_t, a_t) + \gamma V(s_{t+1}) - V(s_t)$$
+
+或使用 GAE (Generalized Advantage Estimation):
+
+$$A_t^{\text{GAE}} = \sum_{l=0}^{T-t} (\gamma \lambda)^l \delta_{t+l}, \quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+
+**Step 3**: 初始策略训练. 用 advantage 加权的 MSE loss 替代标准 MSE loss. 高 advantage (好动作) 对应高权重, 低 advantage (差动作) 对应低权重或零权重.
+
+**Step 4 (迭代)**: 核心的自我改进循环:
+- **Rollout**: 部署当前策略 $\pi$ 收集新轨迹, 扩充数据集
+- **筛选**: 从新数据中筛出成功轨迹 $D_{\text{succ}}$ (利用 `info["success"]`)
+- **Critic 精调**: 仅在成功轨迹上精调 $V$ (成功数据的值估计更可靠)
+- **重新标注**: 用更新后的 $V$ 重新计算所有数据的 advantage
+- **策略精调**: 用新的 advantage 标签训练策略
+
+关键设计选择:
+1. **只用成功轨迹精调 Critic**: 避免失败轨迹的噪声干扰值估计
+2. **全数据标注 + 训练策略**: 利用所有数据 (成功+失败), advantage 负值自然降低失败动作的权重
+3. **交替更新**: Critic 和 Policy 交替优化, 类似 EM 算法
+
+**代码不存在的验证**:
+
+```python
+# rldx.py:438 — 训练损失中无 advantage 加权
+action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * loss_mask
+# 如果实现 RECAP, 这行需要改为:
+# action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * loss_mask * advantage_weights
+```
+
+在 200+ 个训练配置参数 (`train_config.py`) 中, 无任何 RL 相关参数:
+- 无 `advantage_weight`, `critic_lr`, `recap_iterations`, `reward_discount` 等
+- 无 `--use-rl`, `--recap`, `--critic-model` 等 CLI 标志
+
+### 21.4 VLM Critic: 文本预测值估计 [论文 Only ❌]
+
+#### 21.4.1 核心创新: 复用 VLM 文本接口做值估计
+
+RLDX-1 论文提出了一个创新的 Critic 设计: **不新增预测头, 直接复用 VLM 的文本生成接口进行值估计**.
+
+```mermaid
+graph LR
+    subgraph "VLM Critic 架构"
+        A["当前观测<br>(视频帧)"] --> D["gemma3-4b-it<br>+ LoRA r=128"]
+        B["任务指令<br>(自然语言)"] --> D
+        C["离散化状态<br>(文本描述)"] --> D
+        D -->|"自回归解码"| E["整数值<br>(文本 token)"]
+        E -->|"int() 转换"| F["V(s) ∈ ℤ"]
+    end
+
+    style D fill:#f9d,stroke:#333
+    style F fill:#9df,stroke:#333
+```
+
+**输入构造**: 将多模态信息编码为 VLM 可理解的格式:
+
+$$V(s_t) = \text{int}\left( f_{\text{VLM}}(\text{obs}_t, \text{task}, \text{state\_desc}) \right)$$
+
+- **obs_t**: 当前视频帧 (视觉输入)
+- **task**: 任务描述 (如 "screw in the light bulb")
+- **state_desc**: 离散化的机器人状态 (如 "gripper: open, arm: extended, bulb: loose")
+
+**输出**: VLM 自回归生成一个整数文本 (如 "7"), 代表当前状态的值. 之后用 `int()` 转换为数值.
+
+#### 21.4.2 设计理由分析
+
+**为什么用文本预测而非回归头?**
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| 回归头 ($V = \text{MLP}(h_{\text{VLM}})$) | 直接优化, 精度高 | 需要新增参数, 数据需求大 |
+| **文本预测** ($V = \text{int}(\text{VLM}(\cdot))$) | **复用预训练知识, few-shot 泛化** | 精度受离散化限制 |
+
+文本预测的优势在于: VLM (gemma3-4b-it) 在预训练中已经学会了大量关于物理世界、操作任务、因果关系的知识. 通过文本接口, 这些知识可以直接迁移到值估计任务, 而不需要从头训练一个值函数. 这对数据稀缺的机器人场景尤为重要.
+
+**为什么用 gemma3-4b-it 而非 Qwen3-VL?**
+
+RLDX-1 的策略网络 (Actor) 使用 Qwen3-VL-8B 作为 backbone. Critic 使用不同的模型 (gemma3-4b-it) 有几个原因:
+1. **Actor-Critic 解耦**: 避免 critic 梯度干扰 actor 的特征提取
+2. **计算效率**: 4B 模型比 8B 更轻量, critic 推理更快
+3. **指令跟随能力**: gemma3 的 it (instruction-tuned) 版本擅长指令跟随, 适合文本预测任务
+
+**LoRA rank=128 的选择**:
+
+典型 LoRA rank 范围: 8-256. rank=128 属于中高端:
+- rank=8-16: 参数高效但表达能力有限, 适合简单迁移
+- **rank=128**: 平衡参数效率 (~50M 可训练参数) 与值函数的复杂度需求
+- rank=256: 接近全参微调, 可能过拟合小数据集
+
+#### 21.4.3 代码不存在的验证
+
+在整个代码库中搜索确认:
+
+- **无 gemma 模型相关代码**: 不存在 `gemma`, `Gemma`, `gemma3` 等引用 (除 README 中的一般性描述)
+- **无 Critic 类**: 不存在 `Critic`, `ValueFunction`, `ValueHead` 等类定义
+- **无 LoRA 训练代码**: 虽然 `train_config.py` 支持 LoRA (`lora_rank`, `use_lora`), 但这用于 policy 微调, 不是 critic
+- **无 advantage 计算**: 不存在 `advantage`, `gae`, `td_error` 等函数或变量
+
+### 21.5 RECAP 训练效果分析 [论文数据]
+
+#### 21.5.1 Light Bulb Twisting 实验结果
+
+论文在 Light Bulb Twisting (拧灯泡) 任务上验证了 RECAP 的效果. 这是一个精密操作任务: 机器人需要抓住灯泡、对准螺口、旋转拧入, 多次尝试直到完全拧入.
+
+| 阶段 | 帧数 (mean±std) | 尝试次数 (mean±std) | 相对 BC 改善 |
+|------|----------------|-------------------|-------------|
+| Teleop (人类) | — | ~5 | 基准 |
+| BC (模仿学习) | 1056 ± 326 | 12.7 ± 3.0 | — |
+| RECAP₁ | — | ~8.5 | 33% ↓ |
+| RECAP₂ | — | ~5.0 | 61% ↓ |
+| RECAP₃ | 353 ± 22 | **4.1 ± 0.3** | **68% ↓** |
+
+关键观察:
+1. **BC 远逊于人类**: 12.7 次尝试 vs 人类 5 次, 且方差大 (±3.0), 说明 BC 策略不稳定
+2. **每轮 RECAP 都有显著改善**: RECAP₁→₂→₃ 单调改进, 无性能退化
+3. **RECAP₃ 超越人类**: 4.1 ± 0.3 次尝试, 不仅优于人类遥操作, 方差还极小 (±0.3)
+4. **帧数大幅下降**: 353 vs 1056, 约 3× 加速, 说明策略学会了更高效的运动路径
+
+#### 21.5.2 Best-of-N 采样与 RECAP 的关系
+
+Section 6.3 额外分析了 Best-of-N (BoN) 采样与 RECAP 的交互效应:
+
+```mermaid
+graph LR
+    subgraph "BoN 对不同阶段策略的效果"
+        R1["RECAP₁<br>(欠收敛)"] -->|"BoN 有效"| R1B["8.5 → 4.9 次<br>✅ 探索帮助"]
+        R2["RECAP₂<br>(基本收敛)"] -->|"BoN 无效/有害"| R2B["~5.0 → 略差<br>❌ 随机性干扰"]
+        R3["RECAP₃<br>(完全收敛)"] -->|"BoN 有害"| R3B["4.1 → 更差<br>❌ 偏离最优"]
+    end
+```
+
+**解释**: BoN 的本质是在推理时从多个采样中选最优 — 这是一种**探索机制**:
+- 对欠收敛策略: 单次采样可能不好, 多次采样增加命中最优动作的概率
+- 对已收敛策略: 单次采样已经接近最优, 多次采样引入的随机性反而偏离最优解
+
+**结论**: BoN 是 RECAP 的**互补手段**, 不是替代品. 在 RECAP 早期 (策略欠收敛) 使用 BoN 可以获得更好的 rollout 数据; 在 RECAP 后期 (策略已收敛) 应关闭 BoN.
+
+#### 21.5.3 迭代改进的收敛行为
+
+RECAP₁→₂→₃ 的迭代改善模式表现出典型的递减收益:
+
+| 迭代 | 改善幅度 (尝试次数) |
+|------|-------------------|
+| BC → RECAP₁ | 12.7 → 8.5 (▼ 4.2, 33%) |
+| RECAP₁ → RECAP₂ | 8.5 → 5.0 (▼ 3.5, 41%) |
+| RECAP₂ → RECAP₃ | 5.0 → 4.1 (▼ 0.9, 18%) |
+
+前两轮改善显著, 第三轮边际收益递减. 这符合 RL 的一般规律: 初期有大量 low-hanging fruit (明显的差动作被降权), 后期策略趋近最优, 改善空间缩小.
+
+论文最终使用 3 轮迭代, 可能是基于经验: 更多轮次的计算成本不再值得边际改善.
+
+### 21.6 实现差距: RECAP 完整化需要什么
+
+#### 21.6.1 缺失组件清单
+
+| 组件 | 描述 | 当前状态 | 实现复杂度 |
+|------|------|---------|-----------|
+| VLM Critic 模型 | gemma3-4b-it 加载 + LoRA r=128 | ❌ 不存在 | 高: 需要新模型集成 |
+| Critic 训练循环 | 在 $(s, V^*)$ 对上训练文本预测 | ❌ 不存在 | 高: 新训练管线 |
+| 值标签生成 | 将成功/失败 + 步数 → 数值标签 | ❌ 不存在 | 低: 简单数据处理 |
+| Advantage 计算 | Critic 推理 → TD/GAE advantage | ❌ 不存在 | 中: 标准 RL 组件 |
+| Advantage-conditioned Loss | 修改 `rldx.py:438` 的 MSE loss | ❌ 不存在 | 低: 几行代码 |
+| 成功轨迹筛选 | 从 rollout CSV 中 filter success=True | ❌ 不存在, 但数据格式已有 | 低: 简单过滤 |
+| 迭代编排脚本 | 交替训练 critic / policy, N 轮 | ❌ 不存在 | 中: 脚本编排 |
+| Rollout → 训练数据转换 | 将 rollout 轨迹转换为 LeRobot v2.1 格式 | ❌ 不存在 | 中: 格式转换 |
+
+#### 21.6.2 现有基础设施的复用路径
+
+```mermaid
+graph TD
+    subgraph "已实现 ✅"
+        A["RLDXPolicy<br>rldx_policy.py"]
+        B["PolicyServer<br>(ZeroMQ)"]
+        C["run_rollout<br>rollout_policy.py"]
+        D["CSV Logger<br>success/reward/steps"]
+        E["VideoRecorder<br>success/failure 命名"]
+        F["Training Pipeline<br>launch_train.py"]
+    end
+
+    subgraph "需要新增 ❌"
+        G["VLM Critic<br>gemma3-4b-it + LoRA"]
+        H["Advantage Calculator<br>GAE / TD"]
+        I["Advantage-conditioned<br>Loss Modifier"]
+        J["Iteration Orchestrator<br>N 轮交替训练"]
+        K["Trajectory → LeRobot<br>格式转换器"]
+    end
+
+    A --> B --> C --> D
+    C --> E
+    D -->|"filter success=True"| K
+    K --> F
+    F --> A
+
+    D -->|"值标签"| G
+    G --> H
+    H --> I
+    I --> F
+    J -->|"编排"| C
+    J -->|"编排"| F
+
+    style A fill:#9f9,stroke:#333
+    style B fill:#9f9,stroke:#333
+    style C fill:#9f9,stroke:#333
+    style D fill:#9f9,stroke:#333
+    style E fill:#9f9,stroke:#333
+    style F fill:#9f9,stroke:#333
+    style G fill:#f99,stroke:#333
+    style H fill:#f99,stroke:#333
+    style I fill:#f99,stroke:#333
+    style J fill:#f99,stroke:#333
+    style K fill:#f99,stroke:#333
+```
+
+**关键 Gap**: 缺失的核心是 Critic 网络 + Advantage-conditioned Loss. 其他组件 (筛选、编排、格式转换) 虽然不存在, 但实现难度较低.
+
+**最小可行实现路径**:
+1. 加载 gemma3-4b-it, 应用 LoRA rank=128
+2. 定义 Critic 训练数据格式: `(video_frame, task_text, state_text) → value_integer`
+3. 训练 Critic (标准 VLM fine-tuning, 文本生成 loss)
+4. 在训练集上推理 Critic, 计算 advantage
+5. 修改 `rldx.py:438`, 加入 `* advantage_weights`
+6. 用标准训练管线训练策略 (几乎不需要改)
+7. 脚本循环 1-6, N 轮
+
+#### 21.6.3 工程估算
+
+| 维度 | 估算 |
+|------|------|
+| 核心代码量 | ~2000-3000 行 (Critic 模型、训练、advantage 计算、编排) |
+| 新增依赖 | gemma3-4b-it 权重 (~8GB), 可能需要 `transformers` 更新 |
+| 训练成本 (单轮) | Critic: ~2-4 GPU-hours (4B model, LoRA); Policy: 与正常 fine-tuning 相同 |
+| 总成本 (3 轮) | Rollout + Critic + Policy × 3 ≈ ~50-100 GPU-hours |
+| Rollout 成本 | 取决于环境: 模拟器快 (~1000 episodes/hour), 真机慢 (~10 episodes/hour) |
+
+### 21.7 代码基础设施详解: Rollout 系统 [代码实现 ★]
+
+#### 21.7.1 Rollout 架构
+
+```mermaid
+classDiagram
+    class BasePolicy {
+        <<abstract>>
+        +get_action(obs, options) tuple
+    }
+    class RLDXPolicy {
+        -model: RLDX
+        -session_registry: SessionRegistry
+        +get_action(obs, options)
+        +reset()
+    }
+    class RLDXSimPolicyWrapper {
+        -policy: BasePolicy
+        +get_action(obs, options)
+    }
+    class PolicyServer {
+        -policy: BasePolicy
+        -host: str
+        -port: int
+        +run()
+    }
+    class ReplayPolicy {
+        -dataset: LeRobotDataset
+        +get_action(obs, options)
+    }
+
+    BasePolicy <|-- RLDXPolicy
+    BasePolicy <|-- ReplayPolicy
+    RLDXPolicy --> RLDXSimPolicyWrapper : wraps
+    BasePolicy --> PolicyServer : serves
+
+    class ServerConfig {
+        +model_path: str
+        +embodiment_tag: EmbodimentTag
+        +device: str
+        +host: str
+        +port: int
+        +compile: str
+        +rtc_inference_mode: str
+    }
+
+    class WrapperConfigs {
+        +video: VideoConfig
+        +multistep: MultiStepConfig
+    }
+    class VideoConfig {
+        +video_dir: str
+        +fps: int
+        +codec: str
+    }
+    class MultiStepConfig {
+        +n_action_steps: int
+        +max_episode_steps: int
+        +terminate_on_success: bool
+    }
+
+    WrapperConfigs --> VideoConfig
+    WrapperConfigs --> MultiStepConfig
+```
+
+**推理服务架构** (`run_rldx_server.py`):
+
+Client-Server 分离设计:
+- **Server**: 加载 RLDXPolicy + 可选编译优化, 通过 ZeroMQ 暴露 `get_action` 接口
+- **Client**: `rollout_policy.py` 作为客户端, 驱动环境并发送观测给 server
+
+```python
+# run_rldx_server.py:159 — 创建策略
+policy = RLDXPolicy(
+    embodiment_tag=config.embodiment_tag,
+    model_path=config.model_path,
+    device=config.device,
+    ...
+)
+
+# run_rldx_server.py:194 — 可选推理优化
+if opt_path is not None:
+    info = apply_optimization(policy, path=opt_path)
+
+# run_rldx_server.py:206 — 启动 ZeroMQ 服务
+server = PolicyServer(policy=policy, host=config.host, port=config.port)
+server.run()
+```
+
+#### 21.7.2 成功追踪机制详解
+
+成功检测的完整逻辑 (`rollout_policy.py:502-530`) 处理了多种数据类型, 体现了面对不同模拟器的健壮性设计:
+
+```python
+# 第一层: step-level success (每步检查)
+if "success" in env_infos:
+    env_success = env_infos["success"][env_idx]
+    # 类型适配: list → np.any, ndarray → np.any, bool → 直通, int → bool
+    current_successes[env_idx] |= bool(env_success)
+
+# 第二层: final_info (episode 结束时的完整信息)
+if "final_info" in env_infos and env_infos["final_info"][env_idx] is not None:
+    env_success = env_infos["final_info"][env_idx]["success"]
+    current_successes[env_idx] |= bool(env_success)
+```
+
+**OR-累积语义** (`|=`): 一个 episode 中任何时间步的 `success=True` 都计入成功. 这对操作任务是合理的 — 灯泡拧入的瞬间 `success=True`, 之后即使手松开 success 仍然有效.
+
+**额外指标收集**:
+```python
+# task_progress: 渐进式任务进度 (如灯泡拧入角度)
+if "task_progress" in env_infos:
+    episode_infos["task_progress"].append(env_infos["task_progress"][env_idx][-1])
+
+# q_score: 操作质量评分 (取最大值)
+if "q_score" in env_infos:
+    episode_infos["q_score"].append(np.max(env_infos["q_score"][env_idx]))
+
+# valid: 环境是否有效 (过滤掉无效 episode)
+if "valid" in env_infos:
+    episode_infos["valid"].append(all(env_infos["valid"][env_idx]))
+```
+
+这些指标虽然在当前代码中仅用于评估, 但对 RECAP 的 reward 设计有直接价值:
+- `task_progress` 可作为 dense reward 的候选
+- `q_score` 可作为操作质量的 reward
+- `valid` 可用于过滤异常 episode
+
+#### 21.7.3 数据记录格式
+
+CSV 格式 (`rollout_policy.py:616-651`):
+
+```python
+columns = ["env_idx", "episode_idx", "success", "reward", "steps", "video_path"]
+
+# 视频文件命名规范:
+# {env_name}_env{idx:02d}_episode{ep:02d}_{success|failure}.mp4
+```
+
+**对 RECAP 的价值**:
+- `success` 列: 直接用于 $D_{\text{succ}}$ 筛选
+- `reward` 列: 已预留但当前未使用 (环境 reward), 可用于 advantage 计算
+- `video_path` 列: 可回溯失败案例, 辅助人工分析
+
+**视频目录发现** (`rollout_policy.py:654-684`):
+
+```python
+# 支持断点续录: 检测已录制的 episode 并跳过
+pattern = re.compile(
+    r".*_Env_env(?P<env>\d+)-episode_(?P<episode>\d+)-(?P<status>success|failure)\.mp4$"
+)
+```
+
+#### 21.7.4 Session 与 Memory 集成
+
+Rollout 系统与 Chapter 20 描述的 SessionRegistry 无缝集成:
+
+```python
+# rollout_policy.py:454-457 — 创建独立 session IDs
+session_ids = [f"{env_name}_env{idx}_{uuid.uuid4().hex[:8]}" for idx in range(n_envs)]
+
+# rollout_policy.py:469 — 传递 session 信息
+options = {"reset_memory": is_first_step, "session_ids": session_ids}
+
+# rollout_policy.py:567-568 — Episode 结束时标记 reset
+is_first_step[env_idx] = True  # 下一步是新 episode 的第一步
+```
+
+这保证了:
+1. 每个并行环境有独立的 memory 状态 (不串扰)
+2. Episode 边界自动 reset memory (通过 `is_first_step`)
+3. 与 `SessionRegistry.memory_scratchpad()` 的 multi-session 路径兼容
+
+### 21.8 设计分析
+
+#### 21.8.1 RECAP 的设计优点
+
+1. **训练稳定性**: Advantage-conditioned BC 保持了 BC 的梯度稳定性, 不像 PPO/SAC 需要精细调参 (clip ratio, entropy coefficient, replay buffer size). 对机器人场景尤其重要 — 真机 rollout 昂贵, 不能浪费在不稳定的训练上.
+
+2. **数据效率**: VLM Critic 复用预训练知识, 从有限数据 (几十到几百个 episode) 就能学到有意义的值估计. 传统 RL critic 从零开始学, 在机器人数据量级下几乎不可能收敛.
+
+3. **架构简洁**: 不需要给 RLDX-1 添加新的预测头或修改模型结构. Critic 是独立的 gemma3-4b-it, 训练完后用于标注 advantage, 推理时不需要. 策略网络的修改只是在 loss 上乘一个权重.
+
+4. **自我改进闭环**: Rollout → 筛选 → Critic 精调 → 重新标注 → 策略精调, 形成闭环. 每轮迭代的策略都比上一轮好, 且不需要额外人类演示.
+
+5. **与 Flow-Matching 兼容**: RECAP 的核心是加权 BC loss. RLDX-1 的 flow-matching 训练目标本质上是一种 BC loss (MSE between predicted and target velocity), advantage 加权可以直接应用.
+
+#### 21.8.2 RECAP 的设计缺点/局限
+
+1. **Critic 质量瓶颈**: 文本预测值估计的精度受限于离散化. 连续值 → 整数 token 丢失了精度, 在 advantage 接近零的边界区域可能产生错误的正/负标注.
+
+2. **成功轨迹稀缺问题**: 在困难任务上 (如 BC 成功率 < 10%), $D_{\text{succ}}$ 可能非常小, critic 精调数据不足. 论文的 Light Bulb Twisting BC 表现尚可 (>50% 成功率), 但对更难任务, RECAP 的启动可能受阻.
+
+3. **计算成本累积**: 3 轮迭代意味着 3× rollout + 3× critic 训练 + 3× policy 训练. 对于真机场景, rollout 是主要瓶颈; 对于模拟器, 训练是主要瓶颈.
+
+4. **未开源实现**: RECAP 在 RLDX-1 代码库中完全不存在, 论文的实验结果无法直接复现. 这对社区采纳是显著障碍.
+
+5. **泛化性未验证**: 论文仅在 Light Bulb Twisting 一个任务上验证了 RECAP. 其他任务 (抓取、装配、双臂协作) 是否同样有效, 没有实验证据.
+
+#### 21.8.3 与其他 RL-for-Robotics 方法对比
+
+| 方法 | 数据需求 | 计算成本 | 稳定性 | 适用场景 | 特点 |
+|------|---------|---------|--------|---------|------|
+| **RECAP** | 低 (offline data + few rollouts) | 中 (3 轮迭代) | **高** (BC-based) | 精密操作 | Advantage-conditioned BC |
+| DAgger | 高 (需要专家在线纠正) | 低 (标准 BC) | 高 | 需要专家可及 | 分布偏移纠正 |
+| RLHF/DPO | 中 (pairwise 偏好) | 中-高 | 中 | 文本/离散动作 | 偏好优化 |
+| GRPO | 中 (group 采样) | 中 | 中 | 可并行采样 | 组内相对排序 |
+| PPO/SAC | 高 (大量 on-policy 交互) | **高** | 低 (超参敏感) | 模拟器丰富 | 经典 on-policy/off-policy |
+| RWR | 低 (offline) | 低 | 高 | 简单任务 | Reward-weighted regression |
+| **RECAP 相比 RWR** | 相似 | 略高 (需要 critic) | 相似 | **更复杂任务** | **VLM critic 更好的值估计** |
+
+RECAP 本质上是 RWR (Reward-Weighted Regression) 的升级版: RWR 直接用 reward 加权, RECAP 用 advantage 加权. Advantage 比 reward 更信息丰富 — 它衡量的是"相对于平均水平好多少", 而不是"绝对好不好". 在混合质量数据集中, advantage 加权能更好地区分好动作和差动作.
+
+### 21.9 实现状态验证
+
+#### 21.9.1 实现状态汇总表
+
+| 组件 | 代码位置 | 状态 | 说明 |
+|------|---------|------|------|
+| RECAP 算法 | — | ❌ Paper-Only | 整套 RL 训练逻辑不存在 |
+| VLM Critic (gemma3-4b-it) | — | ❌ Paper-Only | 无模型加载/训练/推理代码 |
+| Advantage 估计 | — | ❌ Paper-Only | 无 TD/GAE 计算 |
+| Advantage-conditioned Loss | — | ❌ Paper-Only | `rldx.py:438` 纯 MSE, 无加权 |
+| Best-of-N 采样 | — | ❌ Paper-Only | 无 multi-sample + selection 逻辑 |
+| 自适应数据收集自动化 | — | ❌ Paper-Only | 无闭环编排脚本 |
+| Rollout 评估循环 | `rollout_policy.py:333-613` | ✅ 已实现 | 向量化环境 + 成功追踪 |
+| 成功标签收集 | `rollout_policy.py:502-530` | ✅ 已实现 | OR-累积, 多类型处理 |
+| CSV 数据记录 | `rollout_policy.py:616-651` | ✅ 已实现 | success/reward/steps/video |
+| 视频录制 | `rollout_policy.py:296-320` | ✅ 已实现 | 自动 success/failure 命名 |
+| Session 管理 | `rollout_policy.py:454-469` | ✅ 已实现 | UUID session + memory reset |
+| ZeroMQ 推理服务 | `run_rldx_server.py:142-216` | ✅ 已实现 | Client-Server 分离 |
+| Post-training 微调 | `setup.py:323-326` | ✅ 已实现 | 标准 supervised FT |
+
+#### 21.9.2 核心代码文件参考表
+
+| 文件 | 行数 | 角色 |
+|------|------|------|
+| `rldx/model/core/rldx.py` | L438 | 训练损失 (纯 MSE, 无 RL) |
+| `rldx/eval/rollout_policy.py` | 812 | Rollout 评估主循环 |
+| `rldx/eval/run_rldx_server.py` | 221 | ZeroMQ 推理服务入口 |
+| `rldx/policy/rldx_policy.py` | 599 | Policy API (get_action) |
+| `rldx/policy/session_registry.py` | 419 | Session 状态管理 (Ch.20) |
+| `rldx/model/core/setup.py` | L323 | Post-training 配置覆盖 |
+| `rldx/data/embodiment_tags.py` | L32 | Post-training embodiment tag |
+| `rldx/configs/train_config.py` | 400+ | 训练参数 (无 RL 参数) |
+
+#### 21.9.3 与 Ch.4.4 声明的逐条验证
+
+| Section 4.4 声明 | 代码验证 | 状态 |
+|-----------------|---------|------|
+| "Base数据收集: 一致性因素 vs 变化因素" | 概念性描述, 无自动化代码 | ❌ 概念 Only |
+| "Refinement: 训练→部署→识别失败→收集" | Rollout 可部署策略, CSV 记录成功/失败, 无自动闭环 | ⚠️ 部分基础设施 |
+| "RECAP 框架 + VLM Critic" | 整套 RECAP 不存在 | ❌ Paper-Only |
+| "VLM 给定观测+指令, 预测整数值" | 无 gemma3 模型, 无文本预测值估计 | ❌ Paper-Only |
+| "gemma3-4b-it, LoRA rank=128" | 无相关代码 | ❌ Paper-Only |
+| "在 D_succ 上精调 V" | 成功标签可收集, 但无 Critic 训练 | ❌ Paper-Only |
+| "RECAP₃: 4.1 ± 0.3 次尝试" | 论文实验数据, 无法在当前代码库复现 | ❌ 不可复现 |
+| "Best-of-N 对 RECAP₁ 有效" | 无 BoN 实现 | ❌ Paper-Only |
+
+#### 与 Ch.18 (MCF) 的相似性
+
+RECAP RL 和 MCF (Motion-Consistency Filtering) 共享相同的实现状态模式:
+
+| 维度 | MCF (Ch.18) | RECAP RL (Ch.21) |
+|------|-------------|-----------------|
+| 论文描述 | 详细算法 + 实验结果 | 详细算法 + 实验结果 |
+| 代码实现 | ❌ 完全不存在 | ❌ 完全不存在 |
+| 基础设施 | 部分 (模拟器, V-JEPA2 评估框架) | 部分 (Rollout, 成功追踪, CSV) |
+| 可复现性 | 不可复现 | 不可复现 |
+| 原因推测 | 涉及外部组件 (Cosmos-Predict2, V-JEPA2) | 涉及外部组件 (gemma3-4b-it, RL 编排) |
+
+两者都是 RLDX-1 论文中描述但未在开源代码中实现的先进功能, 可能存在于内部代码库但未开源, 或处于研究阶段尚未工程化.
+
+---
+
+## 22. 推理优化 (Inference Optimization) 深度实现分析
+
+**对应论文**: Section 5 "推理优化" (rldx1_1.md lines 390-437)
+**实现状态**: ✅ **完整实现** — 112+ 文件, 17+ Triton 内核, 4 条优化路径, 生产级基准测试
+**核心代码**: `rldx/inference/` 目录 (入口: `serve_optimization.py`)
+
+这是迄今分析的所有章节中**实现最完整、代码量最大**的功能模块. 与 Ch.18 (MCF) 和 Ch.21 (RECAP RL) 的 Paper-Only 状态形成鲜明对比 — 推理优化不仅完整实现, 而且达到了生产级质量, 包含完整的基准测试框架和正确性验证.
+
+### 22.1 动机与问题定义
+
+#### 为什么 VLA 需要推理优化?
+
+VLA (Vision-Language-Action) 模型面临一个独特的实时性约束: 机器人控制循环通常要求 **22-40 Hz** 的控制频率 (ALLEX 平台为 40 Hz). 这意味着从观测到动作输出的端到端延迟必须控制在 **25-45 ms** 以内. 超过这个时限, 观测-执行之间的时间差会导致:
+
+1. **运动轨迹偏移**: 机器人执行动作时, 场景已经发生变化
+2. **接触力控制失败**: 精密操作 (如插入、拧螺丝) 需要实时力反馈
+3. **安全风险**: 高延迟下无法及时响应环境变化
+
+然而, RLDX-1 的模型架构包含:
+- **Qwen3-VL-8B backbone**: 8B 参数的 Vision-Language Model
+- **MSAT Action Model**: 多流 Transformer + 4 步 flow-matching 去噪循环
+- **可选模块**: 时间记忆 (Memory) + 运动感知 (Motion) + 物理感知 (Physics)
+
+在标准 PyTorch eager 模式下, 这个管线在 RTX 5090 上需要 **191 ms/step** — 远超实时要求的 5 倍以上.
+
+#### Short-Prefill 工作负载特征
+
+RLDX-1 的推理与大语言模型 (LLM) 推理有根本区别:
+
+| 特征 | LLM 推理 (vLLM/TGI) | VLA 推理 (RLDX-1) |
+|------|---------------------|-------------------|
+| 模式 | 自回归 decode | **非自回归 prefill-only** |
+| 序列长度 | 数千~数万 tokens | **~100-200 tokens** |
+| 批量大小 | 多请求并发 | **B=1** (单机器人) |
+| 计算特征 | compute-bound (matmul) | **memory-bound 与 compute-bound 交替** |
+| 关键瓶颈 | KV-cache 管理, decode 带宽 | **kernel launch overhead, 中间张量 HBM 往返** |
+
+短序列意味着每个 kernel 的实际计算量很小, 但 PyTorch 的 Python 调度开销和 CUDA kernel launch overhead 是固定的. 当序列长度从数千降到一百多时, 这些固定开销占总时间的比例急剧上升.
+
+$$\text{Overhead Ratio} = \frac{T_{\text{launch}} + T_{\text{python}}}{T_{\text{compute}}} \xrightarrow{M \downarrow} \infty$$
+
+这就是为什么 vLLM/TGI 等 LLM serving 框架的优化策略 (PagedAttention, continuous batching) 对 VLA 无效 — 问题的性质不同.
+
+#### PyTorch Eager 的瓶颈分析
+
+Eager 模式下每一步推理的开销分解:
+
+1. **Python 控制流** (~30%): 每个 `nn.Module.forward()` 调用都经过 Python 解释器
+2. **Kernel Launch Overhead** (~25%): 每个 CUDA 操作 (RMSNorm, RoPE, softmax) 独立 launch
+3. **中间张量 HBM 往返** (~25%): 算子之间通过 HBM 传递中间结果
+4. **实际计算** (~20%): 矩阵乘法和注意力计算
+
+```mermaid
+graph LR
+    subgraph "PyTorch Eager 执行流"
+        A["Python: 调用 RMSNorm"] --> B["CUDA Launch: rmsnorm_kernel"]
+        B --> C["HBM Write: norm_output"]
+        C --> D["Python: 调用 Linear"]
+        D --> E["CUDA Launch: gemm_kernel"]
+        E --> F["HBM Write: qkv_output"]
+        F --> G["Python: 调用 RoPE"]
+        G --> H["CUDA Launch: rope_kernel"]
+        H --> I["HBM Write: rope_output"]
+        I --> J["Python: 调用 Attention"]
+        J --> K["CUDA Launch: attention_kernel"]
+    end
+
+    style A fill:#f99
+    style D fill:#f99
+    style G fill:#f99
+    style J fill:#f99
+    style C fill:#ff9
+    style F fill:#ff9
+    style I fill:#ff9
+```
+
+每个红色节点是 Python 调度开销, 每个黄色节点是 HBM 往返. 在短序列场景下, 实际计算 (绿色) 占比极低.
+
+### 22.2 优化路径总览: Path A → D
+
+RLDX-1 实现了 **4 条递进式优化路径**, 每条路径在前一条基础上增加优化深度:
+
+#### 22.2.1 四条路径对比
+
+| 路径 | 技术 | 消除的瓶颈 | 延迟 (ms) | 加速比 | 约束 |
+|------|------|-----------|----------|--------|------|
+| **A: Vanilla** | 无 (eager 基线) | — | 191.19 | 1.00× | 无 |
+| **B: Torch Inductor** | per-module `torch.compile` | 部分 Python 开销 | 189.48 | 1.01× | 排除 Vision Tower |
+| **C: GraphSafe + CUDA Graph** | 静态图转换 + 图捕获 | 所有 kernel launch + Python 调度 | 33.70 | 5.67× | 固定输入形状 |
+| **D: Custom Chain + Triton** | Path C + 手写融合内核 | + 中间张量 HBM 往返 | **25.20** | **7.59×** | 同 C + 需 CUDA 13.0 |
+
+#### 22.2.2 路径递进关系
+
+```mermaid
+graph TD
+    A["Path A: Vanilla<br/>191ms — 基线"] --> B["Path B: Torch Inductor<br/>189ms — per-module torch.compile"]
+    A --> C["Path C: GraphSafe + CUDA Graph<br/>34ms — 静态图 + 图捕获"]
+    C --> D["Path D: Custom Chain + Triton<br/>25ms — 融合内核链"]
+
+    B -.->|"autograd 保留"| RTC_G["✅ RTC Guided 兼容"]
+    C -.->|"fullgraph 静态化"| RTC_T["✅ RTC Trained 兼容"]
+    D -.->|"fullgraph 静态化"| RTC_T2["✅ RTC Trained 兼容"]
+    C -.->|"❌ VJP 不可路由"| RTC_X["❌ RTC Guided 不兼容"]
+    D -.->|"❌ VJP 不可路由"| RTC_X2["❌ RTC Guided 不兼容"]
+
+    style A fill:#fdd
+    style B fill:#fed
+    style C fill:#dfd
+    style D fill:#bfb
+```
+
+Path A→B 是同一个模型的编译器优化; Path C→D 需要先将模型转换为 GraphSafe 形式. 两条路线在 RTC 兼容性上分叉: Path B 保留 autograd 因而兼容 RTC guided 模式, 而 Path C/D 的 fullgraph 静态化使得 Jacobian VJP 无法路由.
+
+#### 22.2.3 入口函数: `apply_optimization()`
+
+整个推理优化的入口是 `serve_optimization.py:547-601` 的 `apply_optimization()` 函数:
+
+```python
+# rldx/inference/serve_optimization.py:547
+def apply_optimization(policy, path: str = "A", compile_mode: str = "max-autotune") -> dict:
+    path = path.upper()
+    if path not in {"A", "B", "C", "D"}:
+        raise ValueError(f"Unknown optimization path: {path!r}")
+
+    full_model = _find_full_model(policy)
+
+    if path == "A":
+        return {"path": "A"}  # 无修改
+
+    if path == "B":
+        info = _apply_path_b(full_model)  # per-module torch.compile
+        return info
+
+    # Path C/D: 检查 RTC 兼容性
+    bake_prefix_len = _resolve_rtc_for_bake(full_model, path)
+    rtc_mode = getattr(cfg, "rtc_inference_mode", "none")
+    if rtc_mode == "guided":
+        raise ValueError("path C/D cannot serve rtc_inference_mode='guided'")
+
+    return _apply_path_cd(policy, path, compile_mode, bake_prefix_len)
+```
+
+调用链:
+
+```
+apply_optimization(policy, path="D")
+├── path="A" → 直接返回 (无修改)
+├── path="B" → _apply_path_b(full_model) → per-module torch.compile
+└── path="C"/"D" → _resolve_rtc_for_bake() → RTC 兼容性检查
+                  → _apply_path_cd() → _CompiledDispatcher 安装
+                    → 首次调用时: _first_time_build()
+                      ├── _build_graph_safe_vla_from_real_inputs()
+                      ├── Path C: setup_vla_cuda_graph()
+                      └── Path D: build_custom_vla_chain() + compile_custom_vla_chain()
+```
+
+#### 22.2.4 与 CLI 的集成
+
+推理服务器通过 `--compile` 标志选择优化路径:
+
+```python
+# rldx/eval/run_rldx_server.py:128-139
+if args.compile and args.rtc_inference_mode == "guided":
+    raise ValueError("compile + guided 不兼容")
+
+# run_rldx_server.py:142-216
+policy = RLDXPolicy(...)
+if args.compile:
+    from rldx.inference.serve_optimization import apply_optimization
+    apply_optimization(policy, path=args.compile)
+```
+
+#### 22.2.5 性能数据
+
+以下数据来自 `rldx/inference/README.md`, 测试环境: RTX 5090 (sm_120 / Blackwell), B=1, 4 denoising steps:
+
+**Full VLA Pipeline**:
+
+| Path | no-add-ons p50 (ms) | all-add-ons p50 (ms) |
+|------|:-------------------:|:--------------------:|
+| A: Vanilla | 191.19 | 193.23 |
+| B: Torch Inductor | 189.48 (1.01×) | 189.07 (1.02×) |
+| C: GraphSafe + CUDA Graph | 33.70 (5.67×) | 36.34 (5.32×) |
+| **D: Custom Chain** | **25.20 (7.59×)** | **26.81 (7.21×)** |
+
+$$\text{Speedup}_{\text{D vs A}} = \frac{T_{\text{vanilla}}}{T_{\text{optimized}}} = \frac{191.19 \text{ ms}}{25.20 \text{ ms}} = 7.59\times$$
+
+**正确性验证** (余弦相似度 vs Path A):
+
+| Path | no add-ons | all add-ons |
+|------|:----------:|:-----------:|
+| B: Torch Inductor | 0.99997 | 0.99999 |
+| C: GraphSafe + CG | 1.00000 | 0.99997 |
+| D: Custom Chain | 0.99997 | 0.99997 |
+
+所有优化路径与 vanilla 输出的余弦相似度 ≥ 0.99997, 确认数学等价性.
+
+### 22.3 Path B: Torch Inductor (torch.compile)
+
+#### 22.3.1 Per-Module 编译策略
+
+Path B 对模型的每个可学习子模块分别调用 `torch.compile`, 使用 `max-autotune-no-cudagraphs` 模式:
+
+```python
+# serve_optimization.py:61-116
+def _apply_path_b(full_model):
+    mode = "max-autotune-no-cudagraphs"
+
+    # LLM: 每层独立编译
+    for i, layer in enumerate(llm.layers):
+        llm.layers[i] = torch.compile(layer, mode=mode)
+
+    # Action Model 子模块
+    action_model.action_encoder = torch.compile(action_model.action_encoder, mode=mode)
+    action_model.state_encoder  = torch.compile(action_model.state_encoder, mode=mode)
+    action_model.model          = torch.compile(action_model.model, mode=mode)  # MSAT
+    action_model.action_decoder = torch.compile(action_model.action_decoder, mode=mode)
+
+    # 可选模块
+    if physics:  torch.compile(physics, mode=mode)
+    if memory:   torch.compile(memory, mode=mode)
+```
+
+**关键排除**: Vision Tower 不编译. 原因: `flash_attn._flash_attn_varlen_forward` 声明 `max_seqlen_*` 为 `SymInt`, 但在 Dynamo trace 时拒绝 FakeTensors, 导致编译失败.
+
+**编译模式**: `max-autotune-no-cudagraphs` — 保留 Triton autotune (自动选择最优 kernel 配置) 但禁用 per-leaf CUDA Graph. 原因: per-leaf compile 产生的多个独立 CUDA Graph 之间的 buffer ownership 无法由 `cudagraph_trees` 跨 eager Python 胶水追踪.
+
+#### 22.3.2 为什么 Path B 提升微小 (1.01×)?
+
+Path B 的加速比仅 1.01-1.02×, 几乎等于零. 原因:
+
+1. **Short-prefill**: 序列太短 (~100-200 tokens), Inductor 的 kernel 融合和代码生成优化空间有限
+2. **Per-leaf 编译**: 模块间的 Python 胶水代码 (循环、条件、字典操作) 无法被 Inductor 消除
+3. **Kernel launch overhead 残留**: 每个编译后的模块仍然是独立的 CUDA 调用
+
+```
+[Module 1: compiled] → [Python glue] → [Module 2: compiled] → [Python glue] → ...
+      ↑ 已优化                ↑ 未优化          ↑ 已优化               ↑ 未优化
+```
+
+Path B 优化了每个模块内部, 但无法消除模块之间的 Python 开销 — 而在 short-prefill 场景下, 模块间开销恰恰是主要瓶颈.
+
+#### 22.3.3 Path B 的价值: RTC Guided 兼容
+
+尽管性能提升微小, Path B 的存在有重要意义: 它**保留了 autograd**, 因此兼容 RTC guided 模式 (Ch.19). RTC guided 需要通过 `torch.autograd.grad()` 计算 Jacobian VJP, 这要求计算图支持反向传播 — Path C/D 的 fullgraph 静态化破坏了这一能力.
+
+### 22.4 GraphSafe 静态图转换
+
+GraphSafe 是 Path C 和 Path D 的**共同前提** — 没有 GraphSafe, 就无法进行 CUDA Graph 捕获或全图编译.
+
+#### 22.4.1 核心思想: 消除数据依赖的动态计算
+
+**问题**: 原始 RLDX-1 模型中有多种数据依赖的动态操作阻止 CUDA Graph 捕获:
+
+| 动态操作 | 所在组件 | 问题 |
+|---------|---------|------|
+| `get_rope_index()` | Backbone LLM | 运行时计算 3D MROPE position IDs |
+| `_make_causal_mask()` | Memory | 运行时构造 causal/block attention mask |
+| `torch.arange(action_horizon)` | Action Model | 每次 forward 创建新张量 |
+| Timestep schedule | Action Model | 去噪步骤时间表动态计算 |
+| `dt = 1/N` | Action Model | Euler 步长动态计算 |
+| 条件分支 | 多处 | if/else 控制流 |
+
+CUDA Graph 要求: **固定的计算图拓扑 + 固定的张量地址**. 任何运行时创建新张量或改变控制流的操作都会破坏这一前提.
+
+**GraphSafe 解法**: 在构造时 (`__init__`) 一次性预计算所有动态量, 存为 `register_buffer` 静态张量. Forward pass 中只使用这些预计算的常量:
+
+```mermaid
+graph LR
+    subgraph "原始模型 (Dynamic)"
+        D1["input_ids"] --> D2["get_rope_index()"]
+        D2 --> D3["动态 position_ids"]
+        D3 --> D4["LLM forward"]
+        D1 --> D5["make_causal_mask()"]
+        D5 --> D6["动态 attention_mask"]
+        D6 --> D4
+    end
+
+    subgraph "GraphSafe 模型 (Static)"
+        S1["__init__: 预计算"] --> S2["static_position_ids<br/>(register_buffer)"]
+        S1 --> S3["static_attention_mask<br/>(register_buffer)"]
+        S4["pixel_values (唯一动态输入)"] --> S5["forward()"]
+        S2 --> S5
+        S3 --> S5
+    end
+
+    style D2 fill:#f99
+    style D5 fill:#f99
+    style S1 fill:#9f9
+```
+
+#### 22.4.2 GraphSafe 类层级
+
+```mermaid
+classDiagram
+    class GraphSafeVLA {
+        +gs_backbone: GraphSafeQwen3VLBackbone
+        +gs_action_model: GraphSafeActionModel
+        +gs_memory: GraphSafeMemory?
+        +_cached_cog: Buffer
+        +_cache_tmp: Buffer
+        +forward(vl_input, state, emb_id, init_noise)
+        +_process_memory(vl_embs)
+        +reset_memory()
+    }
+
+    class GraphSafeQwen3VLBackbone {
+        +gs_visual: GraphSafeQwen3VLVisionModel
+        +gs_text: GraphSafeQwen3VLTextModel
+        +static_input_ids: Buffer
+        +static_position_ids: Buffer
+        +image_mask_3d: Buffer
+        +static_cog_emb: Buffer
+        +forward(vl_input) → backbone_features
+    }
+
+    class GraphSafeActionModel {
+        +gs_msat: GraphSafeMSAT
+        +static_pos_ids: Buffer
+        +static_timesteps: Buffer
+        +dt: float
+        +prefix_len: int
+        +forward(vl_embs, state, emb_id, init_noise)
+    }
+
+    class GraphSafeMSAT {
+        +static_pos_ids_vl: Buffer
+        +static_pos_ids_sa: Buffer
+        +static_attn_mask: Buffer
+        +forward(x_vl, x_sa, time_emb)
+    }
+
+    class GraphSafeMemory {
+        +static_position_ids: Buffer
+        +static_causal_mask: Buffer
+        +forward(cached_cog) → memory_out
+    }
+
+    GraphSafeVLA --> GraphSafeQwen3VLBackbone
+    GraphSafeVLA --> GraphSafeActionModel
+    GraphSafeVLA --> GraphSafeMemory
+    GraphSafeActionModel --> GraphSafeMSAT
+    GraphSafeQwen3VLBackbone --> GraphSafeQwen3VLVisionModel
+    GraphSafeQwen3VLBackbone --> GraphSafeQwen3VLTextModel
+```
+
+#### 22.4.3 GraphSafe Backbone: 静态化 Vision + LLM
+
+**核心文件**: `rldx/inference/backbone/model/graph_safe_qwen3vl_backbone_model.py` (212 行)
+
+Backbone 的静态化涉及 3 个关键操作:
+
+**1. 3D MROPE Position IDs 预计算**:
+```python
+# graph_safe_qwen3vl_backbone_model.py:112-115
+with torch.no_grad():
+    position_ids, _ = inner_model.get_rope_index(extended_input_ids, grid_thw, None)
+# position_ids: (3, B, L_full) — 时间/高度/宽度三轴
+self.register_buffer("static_position_ids", position_ids)
+```
+
+Qwen3-VL 使用三轴旋转位置编码 (Multi-dimensional RoPE), 对图像 tokens 根据空间网格布局分配不同的位置 ID. 原始模型每次 forward 都重新计算; GraphSafe 版本在构造时计算一次, 存为静态 buffer.
+
+**2. Image Token Mask 预计算**:
+```python
+# graph_safe_qwen3vl_backbone_model.py:95-96
+image_mask = input_ids == self.image_token_id
+self.register_buffer("image_mask_3d", image_mask.unsqueeze(-1).expand(B, L_ids, D))
+```
+
+**3. Cog-token 嵌入预计算**:
+```python
+# graph_safe_qwen3vl_backbone_model.py:118-119
+self.register_buffer("static_cog_emb", backbone.cog_emb.data.clone())
+```
+
+Forward pass 变得非常简洁 — 只有 `pixel_values` 是动态输入:
+
+```python
+# graph_safe_qwen3vl_backbone_model.py:133-211
+def forward(self, vl_input):
+    pixel_values = vl_input["pixel_values"]           # 唯一动态输入
+    image_emb, ds_feats = self.gs_visual(pixel_values) # Vision 编码
+    token_emb = self.embed_tokens(self.static_input_ids)  # 静态 input_ids
+    token_emb = token_emb.masked_scatter(self.image_mask_3d, image_emb)  # 图像散射
+    full_emb = torch.cat([token_emb, static_cog_emb], dim=1)  # cog-token 拼接
+    lm_out = self.gs_text(full_emb, self.static_position_ids, ...)  # 静态 pos IDs
+    hidden = lm_out.last_hidden_state[:, -self.n_cog_tokens:, :]    # cog-token 提取
+    return self.qwen_linear(hidden)                                  # 投影
+```
+
+#### 22.4.4 GraphSafe Action Model: 去噪循环静态化
+
+**核心文件**: `rldx/inference/action_model/model/graph_safe_action_model.py` (274 行)
+
+Action Model 的关键动态操作是去噪循环中的时间步调度和 Euler 步长:
+
+```python
+# graph_safe_action_model.py:42-72 (构造时预计算)
+class GraphSafeActionModel(nn.Module):
+    def __init__(self, ..., num_inference_timesteps, prefix_len=0):
+        # 时间步 schedule 预计算
+        self.register_buffer("static_timesteps", timestep_schedule)
+        self.dt = 1.0 / num_inference_timesteps  # Python float 常量
+
+        # RTC trained-mode prefix 长度烘焙
+        self.prefix_len = prefix_len  # 0 = 禁用
+```
+
+去噪循环中不再有任何动态张量创建:
+
+```python
+# 去噪循环 (简化)
+for step_idx in range(self.num_inference_timesteps):
+    t = self.static_timesteps[step_idx]  # 静态 buffer 索引
+    # ... MSAT forward ...
+    x_t = x_t + self.dt * velocity  # 常量步长 Euler 更新
+```
+
+$$x_{t+1} = x_t + \Delta t \cdot v_\theta(x_t, t), \quad \Delta t = \frac{1}{N} = \frac{1}{4} = 0.25$$
+
+**RTC Trained-mode 支持**: 当 `prefix_len > 0` 时, forward 方法接受 `prefix_actions` 参数, 在初始噪声中用真实前缀覆盖前 `prefix_len` 个时间步:
+
+```python
+if self.prefix_len > 0 and prefix_actions is not None:
+    x_t[:, :self.prefix_len, :] = prefix_actions  # 硬约束前缀
+```
+
+#### 22.4.5 GraphSafe VLA: 统一管线
+
+**核心文件**: `rldx/inference/model/graph_safe_vla.py` (141 行)
+
+`GraphSafeVLA` 将 Backbone + (Memory) + Action Model 组合为单一 `nn.Module`:
+
+```python
+# graph_safe_vla.py:69-104
+def forward(self, vl_input, state, embodiment_id, init_noise=None, ...):
+    vl_embs = self.gs_backbone(vl_input)           # Vision-Language 编码
+    if self.gs_memory is not None:
+        vl_embs = self._process_memory(vl_embs)    # 时间记忆融合
+    return self.gs_action_model(vl_embs, state, embodiment_id, init_noise=init_noise, ...)
+```
+
+**Memory 缓存管理** 是 GraphSafeVLA 中最精巧的设计. 记忆模块需要维护跨时间步的滑动窗口缓存, 但 CUDA Graph 要求张量地址固定. 解决方案: 预分配两个静态 buffer, 通过 in-place `.copy_()` 实现滑动:
+
+```python
+# graph_safe_vla.py:106-140
+def _process_memory(self, vl_embs):
+    cog_current = vl_embs[:, -self.n_cog_mem:, :]
+
+    # 滑动窗口: shift-left + append (全部 in-place, 地址不变)
+    self._cache_tmp[:, :-n, :].copy_(self._cached_cog[:, n:, :])  # 左移
+    self._cache_tmp[:, -n:, :].copy_(cog_current)                  # 追加当前
+    self._cached_cog.copy_(self._cache_tmp)                         # 写回
+
+    memory_out = self.gs_memory(self._cached_cog)  # TransformerMemory
+    cog_augmented = memory_out[:, -n:, :]           # 取最后 n 个
+
+    return torch.cat([cog_all, cog_augmented], dim=1)  # 拼接
+```
+
+这个双 buffer 滑动窗口设计使得 `_cached_cog` 和 `_cache_tmp` 的 `data_ptr()` 在整个推理过程中保持不变 — 满足 CUDA Graph 的地址不变要求.
+
+### 22.5 CUDA Graph 捕获 (Path C)
+
+#### 22.5.1 CUDA Graph 原理
+
+CUDA Graph 是 NVIDIA 提供的一种机制: **一次捕获整个 GPU 操作序列, 后续通过单次 API 调用重放**. 在传统 eager 执行中, 每个 CUDA 操作需要:
+
+1. CPU 端分发: Python 调度 + CUDA driver 调用
+2. GPU 端执行: kernel 启动 + 计算
+
+CUDA Graph 将步骤 1 的所有调用合并为一次 `graph.replay()` — 从 CPU 视角看, 整个推理前向传播只是一次 API 调用:
+
+| 方式 | CPU 调用次数 | GPU 行为 |
+|------|------------|---------|
+| Eager | ~1000+ 次 kernel launch | 逐个执行 |
+| CUDA Graph | **1 次** `graph.replay()` | 回放录制的操作序列 |
+
+#### 22.5.2 捕获流程
+
+**核心文件**: `rldx/inference/engine/cuda_graph.py` (130 行)
+
+```mermaid
+sequenceDiagram
+    participant CPU as CPU (Python)
+    participant Side as Side Stream
+    participant Main as Main Stream
+    participant GPU as GPU
+
+    Note over CPU: 构建 GraphSafe 模型
+    CPU->>Side: warmup forward (side stream)
+    Side->>GPU: 预热所有 kernel (JIT 编译)
+    GPU-->>Side: 完成
+    Side->>Main: stream.wait_stream(side)
+
+    Note over CPU: CUDA Graph 捕获
+    CPU->>Main: torch.cuda.CUDAGraph()
+    Main->>GPU: graph.capture_begin()
+    CPU->>Main: gs_vla.forward(static_inputs)
+    Main->>GPU: 录制所有 kernel 调用
+    Main->>GPU: graph.capture_end()
+
+    Note over CPU: 确定性验证
+    CPU->>Main: graph.replay() × 2
+    Main->>GPU: 回放两次, 比较输出
+    GPU-->>CPU: max_diff ≈ 0.0
+
+    Note over CPU: 推理阶段
+    loop 每步推理
+        CPU->>Main: static_inputs.copy_(new_data)
+        CPU->>Main: graph.replay()
+        Main->>GPU: 单次回放整个 VLA
+        GPU-->>CPU: output.clone()
+    end
+```
+
+代码实现:
+
+```python
+# cuda_graph.py:19-129
+def setup_vla_cuda_graph(gs_vla, vl_input, state, embodiment_id, ...):
+    # 1. 克隆静态输入 buffer
+    static_vl_input = {k: v.clone() for k, v in vl_input.items() if isinstance(v, torch.Tensor)}
+    static_state = state.clone()
+
+    # 2. Warmup (side stream, 避免污染 main stream)
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s), torch.no_grad():
+        gs_vla(static_vl_input, static_state, ...)
+    torch.cuda.current_stream().wait_stream(s)
+
+    # 3. CUDA Graph 捕获
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph), torch.no_grad():
+        graph_output = gs_vla(static_vl_input, static_state, ...)
+
+    # 4. 确定性验证 (double replay)
+    graph.replay(); r1 = graph_output.clone()
+    graph.replay(); r2 = graph_output.clone()
+    print(f"Replay determinism: max_diff={(r1-r2).abs().max().item():.6f}")
+
+    # 5. 返回 replay 函数
+    def replay_fn(vl_input_, state_, ...):
+        static_vl_input["pixel_values"].copy_(vl_input_["pixel_values"])
+        static_state.copy_(state_)
+        graph.replay()
+        return graph_output.clone()  # .clone() 避免被下次 replay 覆盖
+
+    return replay_fn, graph_output
+```
+
+**Warmup 使用 side stream 的原因**: 首次执行会触发 Triton JIT 编译、CUDA 缓存分配等一次性操作. 在 side stream 中完成这些操作, 确保 main stream 在捕获时只包含纯计算 kernel.
+
+**Double replay 确定性验证**: 连续回放两次, 比较输出差异. 非零差异意味着图中存在状态依赖 (如未固定的 RNG), 会导致推理结果不可预测. 这是 GraphSafe 正确性的最终验证.
+
+**输出 `.clone()` 的原因**: `graph_output` 的地址在 graph 内部是固定的 — 每次 `graph.replay()` 都会覆盖同一块内存. 必须在返回前 `.clone()` 到新的张量, 否则调用者持有的引用会被下次回放覆盖.
+
+#### 22.5.3 为什么 Path C 比 Path B 快 5.6×?
+
+Path C (33.70 ms) vs Path B (189.48 ms) → **5.6× 加速**. 这个巨大差距的原因:
+
+1. **消除所有 kernel launch overhead**: ~1000+ 次独立 CUDA launch → 1 次 `graph.replay()`
+2. **消除 Python GIL**: eager 模式下, 每个 `nn.Module.forward()` 都经过 GIL → graph replay 完全在 GPU 端执行
+3. **消除 eager 调度开销**: PyTorch dispatcher 对每个算子的类型检查、shape 推断等 → 全部在捕获时完成
+
+Path B 只优化了每个模块内部的 kernel 代码, 但模块间的 Python 胶水代码和 kernel launch overhead 完全未触及. Path C 通过将整个管线捕获为单一 CUDA Graph, 一次性消除了**所有**非计算开销.
+
+### 22.6 Triton 融合内核 (Path D 核心)
+
+Path D 在 Path C 的基础上进一步优化: 通过手写 Triton 融合内核, 消除中间张量的 HBM (High Bandwidth Memory) 往返. 这是 Path C→D 从 33.70ms 降到 25.20ms (再加速 1.34×) 的关键.
+
+#### 22.6.1 融合策略总览
+
+**核心原则**: matmul (矩阵乘法) 使用 cuBLAS (tensor core 极致优化), 其余 **memory-bound** 操作用 Triton 融合.
+
+VLA 推理中, 每个 Transformer layer 的操作可分为两类:
+
+| 类型 | 操作 | 瓶颈 | 优化策略 |
+|------|------|------|---------|
+| **Compute-bound** | QKV projection, O projection, FFN | 算力 | cuBLAS (不融合) |
+| **Memory-bound** | RMSNorm, RoPE, softmax, 残差加, SwiGLU 非线性 | 显存带宽 | **Triton 融合** |
+
+Memory-bound 操作的问题: 每个操作单独读写 HBM, 中间结果在寄存器→HBM→寄存器之间往返. 融合后, 中间结果保持在寄存器/共享内存中, 只在链的入口读 HBM、出口写 HBM:
+
+```mermaid
+graph TD
+    subgraph "未融合 (6 次 HBM 往返)"
+        U1["HBM Read"] --> U2["RMSNorm"]
+        U2 --> U3["HBM Write + Read"]
+        U3 --> U4["Weight Multiply"]
+        U4 --> U5["HBM Write + Read"]
+        U5 --> U6["RoPE"]
+        U6 --> U7["HBM Write + Read"]
+        U7 --> U8["Attention"]
+        U8 --> U9["HBM Write"]
+    end
+
+    subgraph "融合后 (2 次 HBM 往返)"
+        F1["HBM Read"] --> F2["RMSNorm → Weight → RoPE → Attention<br/>(全部在 SRAM/寄存器中)"]
+        F2 --> F3["HBM Write"]
+    end
+
+    style U3 fill:#f99
+    style U5 fill:#f99
+    style U7 fill:#f99
+    style F2 fill:#9f9
+```
+
+#### 22.6.2 融合内核总览
+
+RLDX-1 实现了 **17+ 个 Triton 融合内核**, 覆盖模型的每个组件:
+
+**LLM Decoder 内核**:
+
+| 内核 | 文件 | 行数 | 融合操作 |
+|------|------|------|---------|
+| `fused_llm_attention` | `backbone/llm/engine/kernels/fused_llm_attention.py` | 928 | RMSNorm + Weight + RoPE + Causal Attention + GQA |
+| `fused_add2_rmsnorm` | `backbone/llm/engine/kernels/fused_add2_rmsnorm.py` | 95 | $h = \text{RMSNorm}(h_{\text{out}} + h_{\text{in}})$ |
+| `fused_add3_rmsnorm` | `backbone/llm/engine/kernels/fused_add3_rmsnorm.py` | 99 | $h = \text{RMSNorm}(h_{\text{out}} + h_{\text{in}} + h_{\text{ds}})$ |
+
+**MSAT DoubleStream 内核**:
+
+| 内核 | 融合操作 |
+|------|---------|
+| `rmsnorm_rope_ds` | 2-way RMSNorm + RoPE (SA + VL 分流) |
+| `rmsnorm_rope_ds_3way` | 3-way RMSNorm + RoPE (SA + VL + Physics) |
+| `attention_fusion_ds` | scatter + residual 融合 |
+| `grouped_swiglu` | 2 个 SwiGLU 合并为 1 次 kernel launch |
+| `grouped_res_ln` | 分组残差 + LayerNorm |
+| `vl_epilogue_ln` | VL 流 epilogue + LayerNorm |
+
+**MSAT SingleStream 内核**:
+
+| 内核 | 融合操作 |
+|------|---------|
+| `rmsnorm_rope_ss` | RMSNorm + RoPE (单流) |
+| `rmsnorm_rope_ss_3way` | 3-way RMSNorm + RoPE |
+| `attention_fusion_ss` | 注意力 + scatter 融合 |
+| `fused_mlp_swiglu` | MLP + SwiGLU 融合 |
+| `ss_epilogue_ln` | SingleStream epilogue + LayerNorm |
+
+**Vision Encoder + Memory 内核**:
+
+| 内核 | 融合操作 |
+|------|---------|
+| `fused_vision_attention` | Vision RMSNorm + RoPE + Attention (570 行) |
+| `fused_add2_layernorm` | 残差 + LayerNorm (Vision) |
+| `fused_memory_attention` | Memory RMSNorm + RoPE/Sinusoidal + Attention |
+
+#### 22.6.3 深入: `fused_llm_attention` (最大内核, 928 行)
+
+这是整个推理优化中最复杂的内核, 融合了 LLM Decoder 层中注意力计算的全部 memory-bound 操作:
+
+**融合范围**:
+```
+输入: QKV concat (cuBLAS 输出) + q_norm_w + k_norm_w + cos + sin
+操作: q_norm(RMSNorm) → weight → RoPE → k_norm(RMSNorm) → weight → RoPE → Causal Attention
+输出: attention_output
+```
+
+**GQA (Grouped Query Attention) 处理**:
+
+Qwen3-VL-8B 使用 GQA: 32 个 Q heads 共享 8 个 KV heads (GROUP_SIZE=4). 内核的 grid 按 KV heads 迭代, 每个 CTA 处理 GROUP_SIZE 个 Q heads:
+
+$$\text{Attn}(Q_h, K_{h/G}, V_{h/G}) = \text{softmax}\left(\frac{Q_h K_{h/G}^T}{\sqrt{d_k}}\right) V_{h/G}, \quad G = \frac{N_Q}{N_{KV}} = \frac{32}{8} = 4$$
+
+```python
+# fused_llm_attention.py:42-96 (autotune 配置, 24+ 种)
+@triton.autotune(
+    configs=[
+        # --- NUM_SPLITS = 2 ---
+        triton.Config({"BLOCK_S": 16, "BLOCK_P": 16, "NUM_SPLITS": 2}, num_stages=2, num_warps=2),
+        triton.Config({"BLOCK_S": 16, "BLOCK_P": 32, "NUM_SPLITS": 2}, num_stages=3, num_warps=4),
+        # ... 20+ more configs ...
+        # --- NUM_SPLITS = 8 (smallest M) ---
+        triton.Config({"BLOCK_S": 16, "BLOCK_P": 32, "NUM_SPLITS": 8}, num_stages=2, num_warps=4),
+    ],
+    key=["M"],  # 按序列长度 M 选择最优配置
+)
+```
+
+**Split-KV (Flash-Decoding 风格)**:
+
+在 short-prefill 场景 (M < 128), CTA 数量不足以充分利用 GPU SM. Split-KV 将 K/V 范围分成 NUM_SPLITS 片, 每片由独立 CTA 处理, 最后通过 reduction kernel 合并:
+
+```
+Grid: (cdiv(M, BLOCK_S), NUM_KV_HEADS, NUM_SPLITS)
+
+Split 1: K[0:M/S]    → partial (m₁, l₁, O₁)  ─┐
+Split 2: K[M/S:2M/S] → partial (m₂, l₂, O₂)  ─┤→ Reduction → final O
+...                                              │
+Split S: K[...:M]    → partial (mₛ, lₛ, Oₛ)  ─┘
+```
+
+合并使用 online-softmax 的 partial max/sum 更新:
+
+$$O_{\text{final}} = \frac{\sum_{s=1}^{S} l_s \cdot e^{m_s - m_{\max}} \cdot O_s}{\sum_{s=1}^{S} l_s \cdot e^{m_s - m_{\max}}}$$
+
+当 M ≥ `SPLIT_M_THRESHOLD` (128) 时, 使用直接 kernel (NUM_SPLITS=1) 避免 reduction 开销.
+
+**精度策略**: bf16 存储, fp32 计算 — RMSNorm 和 softmax 的归约操作在 fp32 中进行以保持数值稳定性, 最终结果转回 bf16 写入 HBM.
+
+#### 22.6.4 深入: `grouped_swiglu` (分组 SwiGLU 融合)
+
+MSAT DoubleStream 中, SA 流和 VL 流各有一个 SwiGLU FFN. 原始实现需要 2 次独立 kernel launch; `grouped_swiglu` 将两者合并:
+
+$$\text{SwiGLU}(x) = W_{\text{down}}(\text{SiLU}(W_{\text{gate}} x) \odot W_{\text{up}} x)$$
+
+```python
+# grouped_swiglu.py:0-18
+# 使用 1D 线性化 grid 避免浪费:
+#   SA_total = cdiv(M_sa, BLOCK_M) * cdiv(N_half_sa, BLOCK_N)
+#   VL_total = cdiv(M_vl, BLOCK_M) * cdiv(N_half_vl, BLOCK_N)
+#   Grid: (SA_total + VL_total,)
+# 每个 CTA 根据线性 pid 分解为 (group, pid_m, pid_n)
+```
+
+SA 和 VL 流的 N_half 可能不同 (SA: 4096, VL: 10922), 1D 线性化 grid 设计使得不同大小的两组操作可以高效共享一次 kernel launch, 避免小组 (SA) 浪费 tile.
+
+#### 22.6.5 残差 + RMSNorm 融合
+
+两个变体分别用于标准 Transformer 层和 DeepStack 注入:
+
+**`fused_add2_rmsnorm`**: 标准残差 + RMSNorm
+
+$$h = \text{RMSNorm}(h_{\text{attn\_out}} + h_{\text{residual}})$$
+
+**`fused_add3_rmsnorm`**: 三路残差 (用于 DeepStack)
+
+$$h = \text{RMSNorm}(h_{\text{attn\_out}} + h_{\text{residual}} + h_{\text{deepstack}})$$
+
+其中 RMSNorm 的计算:
+
+$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}} \odot \gamma$$
+
+将加法和归一化融合为一个 kernel, 避免中间残差结果写回 HBM.
+
+#### 22.6.6 Custom Ops 注册机制
+
+所有 Triton 内核通过 `@torch.library.custom_op()` 注册为 PyTorch 自定义算子, 并通过 `.register_fake()` 提供 FakeTensor 元数据 — 使其与 `torch.compile` 兼容:
+
+```python
+# 典型注册模式 (每个内核的 ops 文件)
+@torch.library.custom_op("rldx_backbone::fused_llm_attention", mutates_args=())
+def fused_llm_attention(qkv, q_norm_w, k_norm_w, cos, sin, ...):
+    return _fused_llm_attention_impl(qkv, q_norm_w, k_norm_w, cos, sin, ...)
+
+@fused_llm_attention.register_fake
+def _(qkv, q_norm_w, k_norm_w, cos, sin, ...):
+    return torch.empty(..., device=qkv.device, dtype=qkv.dtype)  # shape-only
+```
+
+命名空间:
+- `rldx_backbone::` — LLM + Vision 内核
+- `ds::` — DoubleStream 内核
+- `ss::` — SingleStream 内核
+- `rldx_memory::` — Memory 内核
+
+共 **18 个 custom op 文件**, 每个 Triton 内核对应一个注册文件.
+
+### 22.7 Custom Chain 构建 (Path D 组装)
+
+Triton 融合内核需要组装为连贯的计算链, 替代原始模型的 forward 方法.
+
+#### 22.7.1 Chain 层级
+
+```mermaid
+classDiagram
+    class CustomVLAChain {
+        +backbone_chain: CustomVLMChain
+        +action_model_chain: CustomActionHeadChain
+        +has_memory: bool
+        +forward(pixel_values, state, emb_id, init_noise)
+    }
+
+    class CustomExpandedVLAChain {
+        +backbone_chain: CustomVLMChain
+        +action_model_chain: CustomExpandedActionHeadChain
+        +has_memory: bool
+        +forward(..., physics_hist, physics_init_noise)
+    }
+
+    class CustomVLMChain {
+        +vision_chain: CustomVisionEncoderChain
+        +llm_chain: CustomLLMChain
+        +embed_tokens: Embedding
+        +qwen_linear: Module
+        +forward(pixel_values) → backbone_features
+    }
+
+    class CustomActionHeadChain {
+        +custom_msat: CustomOpMSAT
+        +state_encoder
+        +action_encoder
+        +action_decoder
+        +forward(vl_embs, state, emb_id, init_noise)
+    }
+
+    class CustomOpMSAT {
+        note: "Triton 融合 DoubleStream + SingleStream"
+    }
+
+    CustomVLAChain --> CustomVLMChain
+    CustomVLAChain --> CustomActionHeadChain
+    CustomExpandedVLAChain --> CustomVLMChain
+    CustomExpandedVLAChain --> CustomExpandedActionHeadChain
+    CustomActionHeadChain --> CustomOpMSAT
+```
+
+2-way (`CustomVLAChain`, 无 physics) 和 3-way (`CustomExpandedVLAChain`, 有 physics) 根据模型配置自动选择:
+
+```python
+# custom_vla_chain.py:114-141
+def build_custom_vla_chain(gs_vla, device, dtype, bake_prefix_len=0):
+    backbone_chain = build_custom_backbone_chain(gs_vla.gs_backbone, ...)
+
+    use_physics = getattr(gs_vla.gs_action_model, "use_physics", False)
+    n_physics = getattr(gs_vla.gs_action_model.gs_msat, "n_physics", 0)
+
+    if use_physics and n_physics > 0:
+        ah_chain = build_custom_expanded_action_model_chain(gs_vla.gs_action_model, ...)
+        return CustomExpandedVLAChain(backbone_chain, ah_chain, gs_vla=gs_vla)
+
+    ah_chain = build_custom_action_model_chain(gs_vla.gs_action_model, ...)
+    return CustomVLAChain(backbone_chain, ah_chain, gs_vla=gs_vla)
+```
+
+#### 22.7.2 单次 `torch.compile` 的意义
+
+构建好的 Custom Chain 最终通过**一次** `torch.compile(fullgraph=True, mode='max-autotune')` 编译为**单一 FX 图**:
+
+```python
+# custom_vla_chain.py:144-207
+def compile_custom_vla_chain(vla_chain, sample_inputs, compile_mode="max-autotune", fullgraph=True):
+    compiled_chain = torch.compile(vla_chain, mode=compile_mode, fullgraph=fullgraph)
+
+    # 触发编译 (首次调用)
+    with torch.no_grad():
+        compiled_chain(pixel_values, state, embodiment_id, init_noise=init_noise, ...)
+
+    return compiled_chain, compile_time_s
+```
+
+**`fullgraph=True`** 的意义: 整个 VLA 前向传播 (Vision → LLM → Memory → 4步去噪) 编译为**一个** FX 图, 没有 graph break. Inductor 可以:
+
+1. **跨 custom op 边界融合**: 相邻 Triton 内核之间的中间 tensor 可以被 Inductor 进一步优化
+2. **全局调度优化**: Inductor 可以重排操作顺序以最大化 SM 利用率
+3. **CUDA Graph 包装**: `max-autotune` 模式下, Inductor 自动将整个编译结果包装为 CUDA Graph 回放
+
+这就是为什么 Path D 实际上**同时**享受了 CUDA Graph (消除 launch overhead) 和 Triton 融合 (消除 HBM 往返) 的双重优势.
+
+#### 22.7.3 Backbone Chain 详情
+
+**核心文件**: `rldx/inference/backbone/engine/custom_backbone_chain.py` (494 行)
+
+`CustomVLMChain` 是最大的 chain 组件, 组合了:
+
+1. **CustomVisionEncoderChain**: 使用 `fused_vision_attention` 替代 eager Vision Attention
+2. **CustomLLMChain**: 使用 `fused_llm_attention` + `fused_add2_rmsnorm` / `fused_add3_rmsnorm` 替代 eager LLM Decoder
+3. **静态 buffer**: 预计算的 token embeddings, RoPE cos/sin, position IDs
+
+Builder 在构建时:
+- 提取每层的 q_norm_weight, k_norm_weight, 预旋转为 `(w, w_rotated)` 对
+- 预计算 `signed_sin` (RoPE 的有符号 sin 矩阵)
+- 运行 autotune 确定 Split-KV 的 M 阈值
+
+```python
+# custom_backbone_chain.py (builder 片段)
+from llm.engine.kernels.fused_llm_attention import prepare_norm_weight_rot, prepare_signed_sin
+
+# 每层预计算 RoPE 权重
+for layer in llm.layers:
+    q_nw, q_nw_rot = prepare_norm_weight_rot(layer.q_norm.weight)
+    k_nw, k_nw_rot = prepare_norm_weight_rot(layer.k_norm.weight)
+```
+
+### 22.8 `_CompiledDispatcher`: 首次调用捕获
+
+#### 22.8.1 设计模式: 透明替换
+
+`_CompiledDispatcher` 是连接 `RLDXPolicy` API 与编译推理链的桥梁. 它实现了一种"透明替换"模式:
+
+```mermaid
+stateDiagram-v2
+    [*] --> NotReady: 安装 Dispatcher
+
+    NotReady --> Ready: 首次调用成功
+    NotReady --> Failed: 构建失败
+
+    state NotReady {
+        [*] --> VanillaForward: __call__()
+        VanillaForward --> Build: vanilla 返回后
+        Build --> [*]: 构建 GraphSafe + 编译链
+    }
+
+    state Ready {
+        [*] --> CopyInputs: __call__()
+        CopyInputs --> ShapeCheck: 检查输入形状
+        ShapeCheck --> Replay: 形状匹配
+        ShapeCheck --> VanillaFallback: 形状漂移
+        Replay --> CloneOutput: compiled(buffers)
+        CloneOutput --> [*]: BatchFeature{"action_pred": action}
+    }
+
+    state Failed {
+        [*] --> AlwaysVanilla: __call__()
+        AlwaysVanilla --> [*]: orig_get_action()
+    }
+```
+
+**生命周期**:
+
+1. **安装阶段**: `_apply_path_cd()` 创建 `_CompiledDispatcher`, 用它替换 `full_model.get_action`
+2. **首次调用**: 用 vanilla 路径服务 (确保第一个请求不延迟), 同时构建 GraphSafe 模型 + 编译链
+3. **后续调用**: copy 新数据到静态 buffer → replay 编译链 → clone 输出返回
+4. **失败回退**: 构建失败或运行时异常 → 永久回退到 vanilla
+
+```python
+# serve_optimization.py:432-516
+def __call__(self, **collated_inputs):
+    if self._failed:
+        return self._orig_get_action(**collated_inputs)  # 永久回退
+
+    if not self._ready:
+        # 首次: vanilla 服务 + 后台构建
+        first_result = self._orig_get_action(**collated_inputs)
+        try:
+            self._first_time_build(collated_inputs)
+        except Exception as e:
+            self._failed = True
+        return first_result
+
+    # 后续: 编译路径
+    try:
+        # 1. 输入准备 + shape drift 检测
+        for k, new in [("pixel_values", pv), ("state", st), ("embodiment_id", emb)]:
+            if new.shape != self._buffers[k].shape:
+                return self._orig_get_action(**collated_inputs)  # 形状漂移, 回退
+
+        # 2. In-place copy 到静态 buffer
+        self._buffers["pixel_values"].copy_(pv)
+        self._buffers["state"].copy_(st)
+        self._buffers["embodiment_id"].copy_(emb)
+        self._buffers["init_noise"].normal_()  # 新噪声
+
+        # 3. Replay
+        with torch.no_grad():
+            action = self._compiled(self._buffers["pixel_values"], ...)
+
+        return BatchFeature({"action_pred": action})
+    except Exception:
+        self._failed = True
+        return self._orig_get_action(**collated_inputs)
+```
+
+#### 22.8.2 Static Buffer 管理
+
+Dispatcher 维护一组**持久地址缓冲区**, 这些 buffer 的 `data_ptr()` 在整个推理过程中保持不变:
+
+| Buffer | 形状 | 更新方式 |
+|--------|------|---------|
+| `pixel_values` | (N_tokens, D) | `.copy_(new_pv)` |
+| `state` | (B, 1, state_dim) | `.copy_(new_state)` |
+| `embodiment_id` | (B,) | `.copy_(new_emb)` |
+| `init_noise` | (B, H, action_dim) | `.normal_()` 原地生成 |
+| `prefix_actions` | (B, prefix_len, action_dim) | `.copy_(src)` (仅 RTC trained) |
+
+**`.normal_()` 的特殊性**: 噪声需要每次推理不同 (flow-matching 去噪的起点), 但张量地址必须固定. `.normal_()` 是 in-place 操作, 不改变 `data_ptr()`, 完美满足两个约束.
+
+#### 22.8.3 Shape Drift 检测
+
+如果输入形状发生变化 (例如换了不同分辨率的摄像头), CUDA Graph 中录制的地址和大小会失效. Dispatcher 在每次调用时检测:
+
+```python
+# serve_optimization.py:464-472
+for k, new in [("pixel_values", pv), ("state", st), ("embodiment_id", emb)]:
+    if new.shape != self._buffers[k].shape:
+        _print(f"[Path{self.path}] Shape drift on '{k}' ...")
+        return self._orig_get_action(**collated_inputs)  # 安全回退
+```
+
+Shape drift 不会使 Dispatcher 永久失效 — 只是当次回退到 vanilla. 这使得系统在短暂的输入变化后可以恢复编译路径.
+
+#### 22.8.4 RTC Prefix 处理
+
+当使用 RTC trained 模式时, PolicyRuntime 在每次推理请求中注入 `action_prefix` — 上一个 chunk 的冻结动作. Dispatcher 将其 copy 到静态 buffer:
+
+```python
+# serve_optimization.py:479-497
+prefix_buf = self._buffers.get("prefix_actions")
+if prefix_buf is not None:
+    src = real_inputs.get("action_prefix")
+    if src is None:
+        raise RuntimeError("trained-mode chain requires action_prefix")
+    prefix_buf.copy_(src[:, :self.bake_prefix_len])
+```
+
+RTC guided 模式则在入口 `apply_optimization()` 处被直接拒绝:
+
+```python
+# serve_optimization.py:580-584
+if rtc_mode == "guided":
+    raise ValueError(
+        "path C/D cannot serve rtc_inference_mode='guided' — "
+        "the compiled fullgraph cannot route VJP"
+    )
+```
+
+### 22.9 RTC 与优化路径的兼容性
+
+RTC (Real-Time Chunking, Ch.19) 的推理模式与优化路径之间存在关键约束.
+
+#### 22.9.1 兼容性矩阵
+
+| | RTC none | RTC trained | RTC guided |
+|------|:--------:|:-----------:|:----------:|
+| **Path A** (Vanilla) | ✅ | ✅ | ✅ |
+| **Path B** (Inductor) | ✅ | ✅ | ✅ |
+| **Path C** (CUDA Graph) | ✅ | ✅ (prefix 静态化) | ❌ |
+| **Path D** (Custom Chain) | ✅ | ✅ (prefix 静态化) | ❌ |
+
+#### 22.9.2 技术原因: 为什么 Path C/D 不兼容 RTC Guided?
+
+RTC guided 模式需要通过 `torch.autograd.grad()` 计算 Jacobian VJP (Vector-Jacobian Product), 对去噪轨迹施加梯度引导. 这与 Path C/D 的两个核心机制冲突:
+
+**1. CUDA Graph 要求固定计算图**:
+- `torch.autograd.grad()` 在每次调用时**动态创建** autograd 计算节点
+- CUDA Graph 要求计算图拓扑在捕获后**永不改变**
+- 矛盾: VJP 的反向图每次推理可能不同 (梯度路径取决于前向结果)
+
+**2. `torch.compile(fullgraph=True)` 禁止 graph break**:
+- `torch.enable_grad()` 是一个 **graph break** — 它改变 PyTorch 的全局状态
+- RTC guided 需要在去噪循环的特定步骤开启/关闭梯度
+- `fullgraph=True` 要求整个 forward 无 graph break
+
+**Path B 为什么兼容**: Path B 是 per-module 编译, 模块之间的 Python 胶水代码保留了完整的 Python 控制流能力 — 包括 `torch.enable_grad()` 和 `torch.autograd.grad()`.
+
+#### 22.9.3 代码中的验证
+
+```python
+# rldx/eval/run_rldx_server.py:128-139 (CLI 启动时验证)
+if args.compile and args.rtc_inference_mode == "guided":
+    raise ValueError("compile + guided 不兼容")
+
+# rldx/inference/serve_optimization.py:580-584 (运行时验证)
+if rtc_mode == "guided":
+    raise ValueError("path C/D cannot serve rtc_inference_mode='guided'")
+
+# rldx/inference/_rtc_dispatch.py:10-23 (prefix_len 解析)
+def resolve_rtc_for_bake(full_model, path):
+    if path not in ("C", "D"):
+        return 0
+    if getattr(cfg, "rtc_inference_mode", "none") != "trained":
+        return 0
+    return max(int(getattr(cfg, "rtc_inference_delay", 0)), 0)
+```
+
+#### 22.9.4 优化路径选择决策图
+
+```mermaid
+graph TD
+    Start["选择推理配置"] --> RTC{"RTC 模式?"}
+
+    RTC -->|"none"| Perf{"需要最低延迟?"}
+    RTC -->|"trained"| Perf2{"需要最低延迟?"}
+    RTC -->|"guided"| PathAB{"需要编译优化?"}
+
+    Perf -->|"是"| PathD1["Path D: Custom Chain<br/>25ms, 7.59×"]
+    Perf -->|"否"| PathA1["Path A: Vanilla<br/>191ms, 无约束"]
+
+    Perf2 -->|"是"| PathD2["Path D + prefix_len bake<br/>~27ms, RTC trained"]
+    Perf2 -->|"否"| PathA2["Path A + RTC trained<br/>~193ms"]
+
+    PathAB -->|"是"| PathB["Path B: Torch Inductor<br/>189ms, autograd 保留"]
+    PathAB -->|"否"| PathA3["Path A + RTC guided<br/>~195ms"]
+
+    style PathD1 fill:#bfb
+    style PathD2 fill:#bfb
+    style PathB fill:#fed
+    style PathA1 fill:#fdd
+    style PathA2 fill:#fdd
+    style PathA3 fill:#fdd
+```
+
+### 22.10 Transformer Layer 融合管线详解
+
+本节以具体的 Transformer 层为例, 展示融合前后的操作流对比.
+
+#### 22.10.1 LLM Decoder Layer 融合管线
+
+标准 LLM Decoder Layer 的操作流:
+
+```
+[原始: 12 个独立 kernel]
+RMSNorm(h) → Q proj → q_norm → RoPE(Q)
+           → K proj → k_norm → RoPE(K)
+           → V proj
+           → Attention → O proj → residual_add → RMSNorm
+           → gate_proj → silu → up_proj → mul → down_proj → residual_add
+```
+
+融合后:
+
+```
+[融合: 5 个 kernel]
+Stage 1: QKV GEMM (cuBLAS, 1 kernel)
+Stage 2: fused_llm_attention (Triton, 1 kernel)
+         — q_norm + weight + RoPE + k_norm + weight + RoPE + Attention
+Stage 3: O projection (cuBLAS, 1 kernel)
+Stage 4: fused_add2_rmsnorm (Triton, 1 kernel)
+         — residual + RMSNorm
+Stage 5: SwiGLU MLP (cuBLAS × 2 + Inductor fuse, 1 kernel)
+         — gate + up + silu + mul + down
+Stage 6: fused_add2_rmsnorm / fused_add3_rmsnorm (Triton, 1 kernel)
+         — 跨层 epilogue
+```
+
+从 ~12 个 kernel → 5-6 个 kernel, 中间 6-7 次 HBM 往返被消除.
+
+#### 22.10.2 MSAT DoubleStream Block 融合管线
+
+DoubleStream 有 SA 和 VL 两个并行流, 融合策略是将两个流的同类操作合并:
+
+```mermaid
+graph TD
+    subgraph "DoubleStream 融合管线"
+        I["SA hidden + VL hidden"] --> K1["rmsnorm_rope_ds<br/>(2-way RMSNorm + RoPE)"]
+        K1 --> K2["QKV GEMM (cuBLAS × 2)"]
+        K2 --> K3["F.scaled_dot_product_attention × 2"]
+        K3 --> K4["attention_fusion_ds<br/>(scatter + residual)"]
+        K4 --> K5["SwiGLU GEMM (cuBLAS × 4)"]
+        K5 --> K6["grouped_swiglu<br/>(2-group SiLU*gate 融合)"]
+        K6 --> K7["down GEMM (cuBLAS × 2)"]
+        K7 --> K8["grouped_res_ln + vl_epilogue_ln<br/>(分组残差 + LayerNorm)"]
+    end
+
+    style K1 fill:#9f9
+    style K4 fill:#9f9
+    style K6 fill:#9f9
+    style K8 fill:#9f9
+```
+
+绿色节点是 Triton 融合内核, 白色节点是 cuBLAS matmul.
+
+#### 22.10.3 为什么 matmul 不融合入 Triton?
+
+**原因**: cuBLAS 对 matmul 有极致的 tensor core 调度优化, 尤其是在小 M (short-prefill) 场景下:
+
+1. **Tile 调度**: cuBLAS 使用硬件特定的 tile 分解策略, 利用 SM 的 warp scheduler 实现近乎满负荷的 tensor core 利用率
+2. **指令级优化**: cuBLAS 的 GEMM kernel 是手写 SASS (GPU 汇编), 不经过 PTX 层
+3. **Autotuning**: cuBLAS 在运行时根据 (M, N, K) 选择最优 kernel, 有数千种预编译变体
+
+Triton 的 matmul 在大 M 场景可以接近 cuBLAS, 但在 M < 128 的 short-prefill 场景性能差距显著. 因此 RLDX-1 的策略是: **matmul 用 cuBLAS, 周围的 memory-bound ops 用 Triton 融合** — 两者各取所长.
+
+### 22.11 基准测试框架
+
+#### 22.11.1 benchmark_vla.py 架构
+
+**核心文件**: `rldx/inference/benchmark_vla.py` (501 行)
+
+基准测试顺序运行 4 条路径, 测量延迟和正确性:
+
+```
+Path A (baseline) → actions_a
+Path B (Inductor) → actions_b → cos_sim(actions_b, actions_a)
+Path C (CUDA Graph) → actions_c → cos_sim(actions_c, actions_a)
+Path D (Custom Chain) → actions_d → cos_sim(actions_d, actions_a)
+```
+
+支持的配置:
+- `--model-type`: `rldx_1_pretrain` (无 add-ons) / `rldx_1_midtrain_allex` (全 add-ons)
+- `--num-images`: 输入图像帧数
+- RTC trained: 自动检测并传递 `prefix_len`
+- Physics: 自动检测并使用 3-way chain
+- Memory: 自动检测并包含 memory 管线
+
+#### 22.11.2 环境要求
+
+| 组件 | 版本 | 原因 |
+|------|------|------|
+| GPU | RTX 5090 (sm_120 / Blackwell) | Path D Triton 内核针对 Blackwell 优化 |
+| CUDA | 13.0 | Inductor 需要 sm_120 PTX/CUBIN 支持 |
+| PyTorch | 2.10.0+cu130 | 最低支持 CUDA 13.0 的 PyTorch 版本 |
+| Flash Attention | 2.7.4.post1 | Vision Tower 使用 flash_attn varlen |
+| Triton | 3.6.0 | 融合内核的运行时 |
+
+#### 22.11.3 Per-Module 基准数据
+
+**Backbone** (Vision Encoder + LLM Decoder):
+
+| Path | 延迟 (ms) | 加速比 |
+|------|----------|--------|
+| A: Vanilla | ~85 | 1.00× |
+| D: Custom Chain | ~9.2 | **9.25×** |
+
+**Action Model** (MSAT, 4 步去噪):
+
+| Path | 延迟 (ms) | 加速比 |
+|------|----------|--------|
+| A: Vanilla | ~95 | 1.00× |
+| D: Custom Chain | ~6.2 | **15.45×** |
+
+Action Model 的加速比高于 Backbone (15.45× vs 9.25×), 原因:
+- 去噪循环执行 4 次 MSAT forward, 每次都有 memory-bound 操作 → 融合收益累积 4×
+- MSAT 的 DoubleStream + SingleStream 结构有大量可融合的分组操作 (grouped_swiglu, grouped_res_ln)
+
+### 22.12 设计分析
+
+#### 22.12.1 优点
+
+1. **渐进式优化**: A → D 逐级增加优化深度. 用户可根据硬件条件和 RTC 需求选择合适的路径, 无需全有或全无.
+
+2. **数学等价**: 所有路径的余弦相似度 ≥ 0.99997. 不牺牲任何精度 — 优化纯粹是系统层面的, 不涉及模型压缩或量化.
+
+3. **透明替换**: `_CompiledDispatcher` 不修改原始模型. 失败时自动回退到 vanilla — 对调用者完全透明. 这种 fail-safe 设计对安全关键的机器人系统至关重要.
+
+4. **RTC trained 兼容**: trained 模式的 prefix_len 可以 bake into 编译链, 使 RTC 不损失优化效果. 只有 guided 模式 (需要 autograd) 才退化到 Path A/B.
+
+5. **完整覆盖**: 每个组件 (Vision, LLM, MSAT DoubleStream, MSAT SingleStream, Memory) 都有专门的 GraphSafe 包装和融合内核 — 没有"木桶短板".
+
+6. **生产级健壮性**: shape drift 检测 + 异常回退 + 确定性验证 + 首次调用 vanilla 保底 — 多层防御保证在各种边界条件下不会崩溃.
+
+#### 22.12.2 缺点与局限
+
+1. **硬件绑定**: 需要 RTX 5090 + CUDA 13.0. 不兼容旧 GPU (A100, V100 等) — 这是因为 Triton 内核和 Inductor 代码生成绑定了 sm_120 (Blackwell) 架构.
+
+2. **RTC guided 不兼容 Path C/D**: 需要 VJP 的用户只能使用 Path A/B (1.01× 加速), 无法享受 CUDA Graph 带来的 5.67× 加速. 这是 autograd 与静态图之间的根本矛盾.
+
+3. **首次调用编译延迟**: `torch.compile(fullgraph=True, mode='max-autotune')` + Triton autotune 需要 **~60-120 秒**. 推理服务器启动后, 第一个请求仍由 vanilla 路径服务.
+
+4. **B=1 优化**: 当前基准和内核 autotune 配置针对 B=1 (单机器人) 优化. 批量推理 (多机器人共享 GPU) 可能需要重新 autotune 或调整 Split-KV 策略.
+
+5. **代码复杂度**: 112+ 文件, 包含 GraphSafe 包装器 (9)、Custom Chains (13)、Triton 内核 (17+)、Custom Ops (18). 维护成本高, 每次原始模型更新都需要同步更新对应的 GraphSafe 包装器和融合链.
+
+6. **与原始模型的同步问题**: 每个 GraphSafe 包装器都是原始模型 forward 的"手工镜像". 如果原始模型增加了新的动态操作 (如新的条件分支), 对应的 GraphSafe 必须同步更新, 否则 Path C/D 会 silently 计算错误 (cos_sim 下降到 ~0.96).
+
+#### 22.12.3 与其他 VLA / LLM 推理优化方法对比
+
+| 方法 | 适用场景 | 加速比 | 精度 | 维护成本 | 限制 |
+|------|---------|--------|------|---------|------|
+| **RLDX-1 Path D** | VLA short-prefill | **7.59×** | 无损 | 高 | RTX 5090, B=1 |
+| TensorRT | 静态图模型 | 5-10× | 可能损失 | 中 | 不支持动态控制流 |
+| vLLM | LLM decode | 3-5× throughput | 无损 | 低 | 面向 decode, 非 VLA |
+| ONNX Runtime | 通用推理 | 2-3× | 无损 | 低 | 不支持 Triton 内核 |
+| 手写 CUDA | 任意 | 理论最优 | 无损 | 极高 | 开发成本极大 |
+| 量化 (INT8/FP8) | 参数压缩 | 2-4× | 有损 | 低 | 可能降低操作精度 |
+
+RLDX-1 的方法本质上是**自定义的 VLA 专用推理引擎**, 介于 TensorRT (自动优化) 和手写 CUDA (完全手动) 之间, 在 short-prefill VLA 场景下实现了极佳的性价比.
+
+### 22.13 实现状态验证
+
+#### 22.13.1 Section 5 逐条验证
+
+| Section 5 声明 | 代码实现 | 状态 |
+|---------------|---------|------|
+| "Graph Capture 优化" — 静态图转换 | 9 个 GraphSafe 文件 + `cuda_graph.py` | ✅ 完整实现 |
+| "Static Graph Conversion" | `register_buffer` 静态化 position IDs, attention masks, timesteps | ✅ 完整实现 |
+| "Kernel 优化" — 4 个融合核 | **17+ 个**融合内核 (远多于表中 4 个) | ✅ 超出描述 |
+| `fused_llm_attention` | 928 行, RMSNorm + RoPE + Attention + GQA + Split-KV | ✅ 完整实现 |
+| `fused_add2_rmsnorm` | 95 行, 残差 + RMSNorm | ✅ 完整实现 |
+| `fused_add3_rmsnorm` | 99 行, 三路残差 + RMSNorm (DeepStack) | ✅ 完整实现 |
+| `grouped_swiglu` | 230 行, 分组 SwiGLU (1D 线性化 grid) | ✅ 完整实现 |
+| "延迟分析" 表 (67→41ms) | 代码 README 数据 (191→25ms) | ⚠️ 数据不一致 |
+| ">22 Hz 实时推理" | 25ms → 40 Hz | ✅ 实现 (超过目标) |
+
+#### 22.13.2 Section 5 与代码 README 的数据差异
+
+Section 5 的延迟数据:
+
+| 推理栈 | Section 5 数据 |
+|-------|---------------|
+| PyTorch Eager | 67.0 ms |
+| + Static Graph | 46.2 ms |
+| + Kernel Optimization | 41.6 ms |
+
+代码 README (`rldx/inference/README.md`) 的数据:
+
+| 推理栈 | README 数据 |
+|-------|------------|
+| A: Vanilla | 191.19 ms |
+| C: GraphSafe + CUDA Graph | 33.70 ms |
+| D: Custom Chain | 25.20 ms |
+
+**可能原因**:
+1. **硬件不同**: Section 5 可能使用了不同的 GPU 或更早期的优化版本
+2. **模型配置不同**: denoising steps 数量、序列长度、图像分辨率可能不同
+3. **测量方法不同**: p50 vs 平均值, 包含/不包含预处理
+4. **优化迭代**: 代码 README 是最新基准, Section 5 可能是较早版本的数据
+
+但核心结论一致: Path D 实现 >22 Hz 实时推理, 且所有路径保持数学等价.
+
+#### 22.13.3 核心代码文件参考表
+
+| 组件 | 文件 | 行数 | 角色 |
+|------|------|------|------|
+| **入口** | `serve_optimization.py` | 602 | 主入口, 路径分发, Dispatcher |
+| **文档** | `inference/README.md` | 267 | 环境, 基准, 使用说明 |
+| **GraphSafe** | | | |
+| VLA | `model/graph_safe_vla.py` | 141 | 统一管线 + Memory 缓存 |
+| Backbone | `backbone/model/graph_safe_qwen3vl_backbone_model.py` | 212 | Vision + LLM 静态化 |
+| Vision | `backbone/vision_encoder/model/graph_safe_qwen3vl_vision_model.py` | 278 | Vision Encoder 静态化 |
+| LLM | `backbone/llm/model/graph_safe_qwen3vl_text_model.py` | 176 | LLM Decoder 静态化 |
+| Action | `action_model/model/graph_safe_action_model.py` | 274 | 去噪循环 + RTC prefix |
+| MSAT | `action_model/model/graph_safe_msat.py` | 147 | MSAT Attention 静态化 |
+| Memory | `memory/model/graph_safe_memory.py` | 99 | Memory 静态化 |
+| **Engine** | | | |
+| CUDA Graph | `engine/cuda_graph.py` | 130 | 图捕获 + 回放 |
+| VLA Chain | `engine/custom_vla_chain.py` | 208 | 统一编译链 |
+| Backbone Chain | `backbone/engine/custom_backbone_chain.py` | 494 | Vision + LLM 融合链 |
+| Action Chain | `action_model/engine/custom_action_model_chain.py` | 163 | 去噪链 |
+| MSAT Chain | `action_model/engine/custom_msat_chain.py` | 99 | MSAT 融合操作链 |
+| Memory Chain | `memory/engine/custom_memory_chain.py` | 133 | Memory 融合链 |
+| **Triton 内核** | | | |
+| LLM Attention | `backbone/llm/engine/kernels/fused_llm_attention.py` | 928 | 最大内核, Split-KV + GQA |
+| Vision Attention | `backbone/vision_encoder/engine/kernels/fused_vision_attention.py` | 570 | Vision 注意力融合 |
+| DS Attention | `action_model/double_stream/engine/kernels/attention_fusion_ds.py` | 404 | DoubleStream 注意力融合 |
+| Grouped SwiGLU | `action_model/double_stream/engine/kernels/grouped_swiglu.py` | 230 | 分组 SwiGLU |
+| Memory Attention | `memory/engine/kernels/fused_memory_attention.py` | 214 | Memory 注意力融合 |
+| **基准测试** | | | |
+| Full VLA | `benchmark_vla.py` | 501 | 4 路径完整基准 |
+| Backbone | `backbone/benchmark_backbone.py` | 247 | per-module 基准 |
+| Action | `action_model/benchmark_action_model.py` | 427 | per-module 基准 |
+| Memory | `memory/benchmark_memory.py` | 218 | per-module 基准 |
+| **其他** | | | |
+| RTC 决策 | `_rtc_dispatch.py` | 24 | prefix_len 解析 |
+| Server | `rldx/eval/run_rldx_server.py` | 221 | CLI 集成 |
+
+#### 22.13.4 实现完整度对比
+
+| 章节 | 论文描述 | 代码实现 | 实现等级 |
+|------|---------|---------|---------|
+| Ch.14 (Backbone + MSAT) | 详细架构描述 | 完整训练+推理代码 | ✅ 完整 |
+| Ch.15 (Flow-Matching) | 去噪理论 + 实验 | 完整训练+推理代码 | ✅ 完整 |
+| Ch.16 (Embodiment) | 多机器人适配 | 完整编码器/解码器 | ✅ 完整 |
+| Ch.18 (MCF) | 详细算法 + 实验 | ❌ 不存在 | ❌ Paper-Only |
+| Ch.19 (RTC) | 训练+推理 | 完整训练+推理代码 | ✅ 完整 |
+| Ch.20 (Memory) | 时间记忆 | 完整训练+推理代码 | ✅ 完整 |
+| Ch.21 (RECAP RL) | 详细算法 + 实验 | ❌ 不存在 | ❌ Paper-Only |
+| **Ch.22 (推理优化)** | ~50 行概述 | **112+ 文件, 17+ 内核** | **✅ 远超描述** |
+
+推理优化是论文中描述最简略 (~50 行) 但代码中实现最完整 (112+ 文件) 的部分. Section 5 仅列出 4 个融合核, 实际有 17+ 个; 仅提及"Static Graph Conversion", 实际有 9 个 GraphSafe 包装器和完整的 `_CompiledDispatcher` 透明替换框架. 这种"论文轻描淡写, 代码重度实现"的模式表明推理优化是 RLDX-1 工程化的核心优先级.
